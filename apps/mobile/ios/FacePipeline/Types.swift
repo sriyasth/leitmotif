@@ -110,6 +110,22 @@ enum MatchReason: String {
     case noGallery = "no_gallery"
 }
 
+// MARK: - Scene Description
+
+struct SceneDescription {
+    let description: String
+    let timestampMs: Int64
+    let model: String
+
+    func toDictionary() -> [String: Any] {
+        [
+            "description": description,
+            "timestamp_ms": timestampMs,
+            "model": model
+        ]
+    }
+}
+
 // MARK: - Pipeline Config
 
 struct PipelineConfig {
@@ -125,6 +141,8 @@ struct PipelineConfig {
     var consecutiveMatchesRequired: Int = 2
     var enrollmentBurstSeconds: Double = 3.0
     var maxEnrollmentExemplars: Int = 6
+    var sceneDescriptionIntervalSeconds: TimeInterval = 15.0
+    var geminiModel: String = "gemini-2.0-flash"
 }
 
 // MARK: - Supabase Row Types

@@ -22,15 +22,15 @@ final class FaceEmbedder {
     /// Load the best available embedding backend.
     /// Priority: AdaFace IR-SE-50 -> EdgeFace XS -> MobileFaceNet -> Vision FeaturePrint.
     func loadModel() throws {
-        if (try? loadCoreMLModel(named: "AdaFace_IR50", version: "ir-se50")) == true {
+        if tryLoadCoreMLModel(named: "AdaFace_IR50", version: "ir-se50") {
             return
         }
 
-        if (try? loadCoreMLModel(named: "EdgeFaceXS", version: "xs")) == true {
+        if tryLoadCoreMLModel(named: "EdgeFaceXS", version: "xs") {
             return
         }
 
-        if (try? loadCoreMLModel(named: "MobileFaceNet", version: "1.0")) == true {
+        if tryLoadCoreMLModel(named: "MobileFaceNet", version: "1.0") {
             return
         }
 
@@ -70,18 +70,57 @@ final class FaceEmbedder {
     // MARK: - CoreML Path
 
     private func loadCoreMLModel(named resourceName: String, version: String) throws -> Bool {
-        let candidateURL =
-            Bundle.main.url(forResource: resourceName, withExtension: "mlmodelc")
-            ?? Bundle.main.url(forResource: resourceName, withExtension: "mlpackage")
+        let candidateURL = resolveModelURL(resourceName: resourceName)
 
         guard let modelURL = candidateURL else { return false }
 
-        let mlModel = try MLModel(contentsOf: modelURL)
+        let loadURL: URL
+        if modelURL.pathExtension == "mlpackage" {
+            loadURL = try MLModel.compileModel(at: modelURL)
+        } else {
+            loadURL = modelURL
+        }
+
+        let mlModel = try MLModel(contentsOf: loadURL)
         let visionModel = try VNCoreMLModel(for: mlModel)
         backend = .coreML(visionModel)
         currentModelName = resourceName
         currentModelVersion = version
         return true
+    }
+
+    private func tryLoadCoreMLModel(named resourceName: String, version: String) -> Bool {
+        do {
+            return try loadCoreMLModel(named: resourceName, version: version)
+        } catch {
+            print("[FaceEmbedder] Failed loading \(resourceName): \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func resolveModelURL(resourceName: String) -> URL? {
+        if let bundled =
+            Bundle.main.url(forResource: resourceName, withExtension: "mlmodelc")
+            ?? Bundle.main.url(forResource: resourceName, withExtension: "mlpackage") {
+            return bundled
+        }
+
+        let envDir = ProcessInfo.processInfo.environment["FACE_EMBEDDER_MODEL_DIR"]
+        let cwd = FileManager.default.currentDirectoryPath
+        let searchDirs = [envDir, "\(cwd)/models"].compactMap { $0 }
+
+        for dir in searchDirs {
+            let modelc = URL(fileURLWithPath: dir).appendingPathComponent("\(resourceName).mlmodelc")
+            if FileManager.default.fileExists(atPath: modelc.path) {
+                return modelc
+            }
+            let mlpackage = URL(fileURLWithPath: dir).appendingPathComponent("\(resourceName).mlpackage")
+            if FileManager.default.fileExists(atPath: mlpackage.path) {
+                return mlpackage
+            }
+        }
+
+        return nil
     }
 
     private func extractCoreMLEmbedding(from faceImage: CGImage, model: VNCoreMLModel) throws -> [Float] {
@@ -179,16 +218,16 @@ final class FaceEmbedder {
         switch multiArray.dataType {
         case .float32:
             let ptr = multiArray.dataPointer.bindMemory(to: Float32.self, capacity: count)
-            return Array(UnsafeBufferPointer(start: ptr, count: count)).map(Float.init)
+            return Array(UnsafeBufferPointer(start: ptr, count: count)).map { Float($0) }
         case .double:
             let ptr = multiArray.dataPointer.bindMemory(to: Double.self, capacity: count)
-            return Array(UnsafeBufferPointer(start: ptr, count: count)).map(Float.init)
+            return Array(UnsafeBufferPointer(start: ptr, count: count)).map { Float($0) }
         case .int32:
             let ptr = multiArray.dataPointer.bindMemory(to: Int32.self, capacity: count)
-            return Array(UnsafeBufferPointer(start: ptr, count: count)).map(Float.init)
+            return Array(UnsafeBufferPointer(start: ptr, count: count)).map { Float($0) }
         default:
             let ptr = multiArray.dataPointer.bindMemory(to: Float32.self, capacity: count)
-            return Array(UnsafeBufferPointer(start: ptr, count: count)).map(Float.init)
+            return Array(UnsafeBufferPointer(start: ptr, count: count)).map { Float($0) }
         }
     }
 

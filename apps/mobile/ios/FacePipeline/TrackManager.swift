@@ -8,12 +8,14 @@ final class FaceTrack {
     var observation: VNFaceObservation
     var embedding: [Float]?
     var qualityScore: Float = 0.0
+    var recognitionConfidence: Float = 0.0
     var matchedIdentityId: String?
     var consecutiveMatches: Int = 0
     var consecutiveMatchIdentity: String?
     var lastSeenTime: TimeInterval
     var firstSeenTime: TimeInterval
     var unknownSessionId: String?
+    var unknownIdSource: UserIdJson.Source = .track
     var didEmitEnteredEvent = false
 
     init(trackId: String, observation: VNFaceObservation, timestamp: TimeInterval) {
@@ -29,9 +31,26 @@ protocol TrackManagerDelegate: AnyObject {
 }
 
 final class TrackManager {
+    private struct UnknownProfile {
+        let id: String
+        var centroid: [Float]     // L2-normalized
+        var samples: Int
+        var lastSeenTime: TimeInterval
+        var averageQuality: Float
+    }
+
     weak var delegate: TrackManagerDelegate?
 
     private var activeTracks: [String: FaceTrack] = [:]
+    private var identityOwner: [String: String] = [:] // identityId -> trackId
+    private var unknownProfiles: [String: UnknownProfile] = [:]
+    private var unknownOwner: [String: String] = [:]   // unknownId -> trackId
+    private(set) var identityConflictsObserved: Int = 0
+    private(set) var identityConflictsResolved: Int = 0
+    private(set) var identityConflictsSuppressed: Int = 0
+    private let unknownSimilarityThreshold: Float = 0.58
+    private let unknownMarginThreshold: Float = 0.04
+    private let unknownProfileTtlSec: TimeInterval = 300
     private let config: PipelineConfig
     private let galleryStore: GalleryStore
     private let faceMatcher: FaceMatcher
@@ -75,6 +94,16 @@ final class TrackManager {
         let matchResult = faceMatcher.match(embedding: embedding, in: galleryStore)
 
         if matchResult.reason == .matched, let identityId = matchResult.identityId {
+            if !canAssignIdentity(identityId, to: track, with: matchResult) {
+                applyUnknownResult(
+                    track: track,
+                    embedding: embedding,
+                    quality: quality,
+                    matchResult: matchResult,
+                    timestamp: timestamp
+                )
+                return
+            }
             applyKnownMatch(
                 track: track,
                 identityId: identityId,
@@ -84,7 +113,13 @@ final class TrackManager {
             return
         }
 
-        applyUnknownResult(track: track, matchResult: matchResult, timestamp: timestamp)
+        applyUnknownResult(
+            track: track,
+            embedding: embedding,
+            quality: quality,
+            matchResult: matchResult,
+            timestamp: timestamp
+        )
     }
 
     /// Check for lost/exited tracks based on timeout.
@@ -114,6 +149,8 @@ final class TrackManager {
                     matchResult: matchResult,
                     timestamp: currentTime
                 )
+                clearIdentityOwnership(for: track.trackId)
+                clearUnknownOwnership(for: track.trackId)
                 track.state = .exited
             }
 
@@ -123,10 +160,17 @@ final class TrackManager {
         for trackId in exitedTrackIds {
             activeTracks.removeValue(forKey: trackId)
         }
+        pruneStaleUnknownProfiles(currentTime: currentTime)
     }
 
     func reset() {
         activeTracks.removeAll()
+        identityOwner.removeAll()
+        unknownOwner.removeAll()
+        unknownProfiles.removeAll()
+        identityConflictsObserved = 0
+        identityConflictsResolved = 0
+        identityConflictsSuppressed = 0
     }
 
     // MARK: - Match Handling
@@ -138,6 +182,7 @@ final class TrackManager {
         timestamp: TimeInterval
     ) {
         let previousIdentity = track.matchedIdentityId
+        let previousUnknownId = track.unknownSessionId
 
         if track.consecutiveMatchIdentity == identityId {
             track.consecutiveMatches += 1
@@ -152,7 +197,35 @@ final class TrackManager {
         }
 
         track.state = .known
+        if let previousUnknownId {
+            let oldUnknownUser = UserIdJson(type: .unknown, id: previousUnknownId, source: track.unknownIdSource)
+            emitEvent(
+                track: track,
+                eventType: .personLeft,
+                userId: oldUnknownUser,
+                matchResult: matchResult,
+                timestamp: timestamp
+            )
+            clearUnknownOwnership(for: track.trackId)
+            track.unknownSessionId = nil
+            track.unknownIdSource = .track
+            track.didEmitEnteredEvent = false
+        }
+        if let previousIdentity, previousIdentity != identityId {
+            // Explicit identity transition: close old identity session before opening new one.
+            let oldUserId = UserIdJson(type: .enrolled, id: previousIdentity, source: .identity)
+            emitEvent(
+                track: track,
+                eventType: .personLeft,
+                userId: oldUserId,
+                matchResult: matchResult,
+                timestamp: timestamp
+            )
+            clearIdentityOwnership(for: track.trackId)
+        }
         track.matchedIdentityId = identityId
+        track.recognitionConfidence = matchResult.confidence
+        identityOwner[identityId] = track.trackId
 
         let userId = UserIdJson(type: .enrolled, id: identityId, source: .identity)
         let shouldEnter = !track.didEmitEnteredEvent || previousIdentity != identityId
@@ -177,28 +250,79 @@ final class TrackManager {
         }
     }
 
-    private func applyUnknownResult(track: FaceTrack, matchResult: MatchResult, timestamp: TimeInterval) {
+    private func applyUnknownResult(
+        track: FaceTrack,
+        embedding: [Float],
+        quality: Float,
+        matchResult: MatchResult,
+        timestamp: TimeInterval
+    ) {
+        let previousIdentity = track.matchedIdentityId
+        let hadKnownIdentity = previousIdentity != nil
+        let previousUnknownId = track.unknownSessionId
+        let previousUnknownSource = track.unknownIdSource
         track.consecutiveMatches = 0
         track.consecutiveMatchIdentity = nil
+        if hadKnownIdentity {
+            let leftUserId = UserIdJson(type: .enrolled, id: previousIdentity!, source: .identity)
+            emitEvent(
+                track: track,
+                eventType: .personLeft,
+                userId: leftUserId,
+                matchResult: matchResult,
+                timestamp: timestamp
+            )
+            clearIdentityOwnership(for: track.trackId)
+            track.matchedIdentityId = nil
+            track.recognitionConfidence = 0
+            track.didEmitEnteredEvent = false
+        }
 
         // Avoid flipping known tracks back to unknown on temporary low-confidence frames.
-        if track.state == .known {
+        // If identity was explicitly cleared (e.g., ownership transfer), continue to unknown path.
+        if track.state == .known && !hadKnownIdentity {
             return
         }
 
-        if track.unknownSessionId == nil {
-            track.unknownSessionId = UUID().uuidString
+        let unknown = resolveUnknownIdentity(
+            track: track,
+            embedding: embedding,
+            quality: quality,
+            timestamp: timestamp
+        )
+        if previousUnknownId != nil, previousUnknownId != unknown.id {
+            let leftUnknown = UserIdJson(type: .unknown, id: previousUnknownId!, source: previousUnknownSource)
+            emitEvent(
+                track: track,
+                eventType: .personLeft,
+                userId: leftUnknown,
+                matchResult: matchResult,
+                timestamp: timestamp
+            )
+            clearUnknownOwnership(for: track.trackId)
+            track.didEmitEnteredEvent = false
         }
 
+        track.unknownSessionId = unknown.id
+        track.unknownIdSource = unknown.source
         track.state = .unknown
-        let userId = UserIdJson(type: .unknown, id: track.unknownSessionId!, source: .track)
+        track.recognitionConfidence = unknown.similarityTop1
+        let userId = UserIdJson(type: .unknown, id: unknown.id, source: unknown.source)
+        let unknownMatchResult = MatchResult(
+            identityId: nil,
+            confidence: unknown.confidence,
+            similarityTop1: unknown.similarityTop1,
+            similarityTop2: unknown.similarityTop2,
+            margin: unknown.margin,
+            reason: matchResult.reason
+        )
 
         if !track.didEmitEnteredEvent {
             emitEvent(
                 track: track,
                 eventType: .personEntered,
                 userId: userId,
-                matchResult: matchResult,
+                matchResult: unknownMatchResult,
                 timestamp: timestamp
             )
             track.didEmitEnteredEvent = true
@@ -207,7 +331,7 @@ final class TrackManager {
                 track: track,
                 eventType: .personUpdated,
                 userId: userId,
-                matchResult: matchResult,
+                matchResult: unknownMatchResult,
                 timestamp: timestamp
             )
         }
@@ -222,8 +346,203 @@ final class TrackManager {
 
         if track.unknownSessionId == nil {
             track.unknownSessionId = UUID().uuidString
+            track.unknownIdSource = .track
         }
-        return UserIdJson(type: .unknown, id: track.unknownSessionId!, source: .track)
+        return UserIdJson(type: .unknown, id: track.unknownSessionId!, source: track.unknownIdSource)
+    }
+
+    private func clearIdentityOwnership(for trackId: String) {
+        let ownedIdentityIds = identityOwner
+            .filter { $0.value == trackId }
+            .map(\.key)
+        for identityId in ownedIdentityIds {
+            identityOwner.removeValue(forKey: identityId)
+        }
+    }
+
+    private func clearUnknownOwnership(for trackId: String) {
+        let ownedUnknownIds = unknownOwner
+            .filter { $0.value == trackId }
+            .map(\.key)
+        for unknownId in ownedUnknownIds {
+            unknownOwner.removeValue(forKey: unknownId)
+        }
+    }
+
+    private func pruneStaleUnknownProfiles(currentTime: TimeInterval) {
+        for (unknownId, profile) in unknownProfiles {
+            let isOwned = unknownOwner[unknownId] != nil
+            if isOwned { continue }
+            if currentTime - profile.lastSeenTime > unknownProfileTtlSec {
+                unknownProfiles.removeValue(forKey: unknownId)
+            }
+        }
+    }
+
+    private struct UnknownIdentityMatch {
+        let id: String
+        let source: UserIdJson.Source
+        let confidence: Float
+        let similarityTop1: Float
+        let similarityTop2: Float
+        let margin: Float
+    }
+
+    private func resolveUnknownIdentity(
+        track: FaceTrack,
+        embedding: [Float],
+        quality: Float,
+        timestamp: TimeInterval
+    ) -> UnknownIdentityMatch {
+        if let currentUnknownId = track.unknownSessionId,
+           var profile = unknownProfiles[currentUnknownId] {
+            profile = updateUnknownProfile(profile, with: embedding, quality: quality, timestamp: timestamp)
+            unknownProfiles[currentUnknownId] = profile
+            unknownOwner[currentUnknownId] = track.trackId
+            return UnknownIdentityMatch(
+                id: currentUnknownId,
+                source: .identity,
+                confidence: profile.averageQuality,
+                similarityTop1: track.recognitionConfidence,
+                similarityTop2: 0,
+                margin: 0
+            )
+        }
+
+        let candidates = unknownProfiles.values.map { profile -> (id: String, similarity: Float) in
+            (profile.id, GalleryStore.cosineSimilarity(embedding, profile.centroid))
+        }
+        let sortedCandidates = candidates.sorted { $0.similarity > $1.similarity }
+        let top1 = sortedCandidates.first
+        let top2 = sortedCandidates.count > 1 ? sortedCandidates[1] : (id: "", similarity: 0)
+        let margin = (top1?.similarity ?? 0) - top2.similarity
+
+        if let top1,
+           top1.similarity >= unknownSimilarityThreshold,
+           margin >= unknownMarginThreshold,
+           canAssignUnknown(top1.id, to: track.trackId) {
+            var profile = unknownProfiles[top1.id]!
+            profile = updateUnknownProfile(profile, with: embedding, quality: quality, timestamp: timestamp)
+            unknownProfiles[top1.id] = profile
+            unknownOwner[top1.id] = track.trackId
+            return UnknownIdentityMatch(
+                id: top1.id,
+                source: .identity,
+                confidence: top1.similarity,
+                similarityTop1: top1.similarity,
+                similarityTop2: top2.similarity,
+                margin: margin
+            )
+        }
+
+        let newUnknownId = "unknown_\(UUID().uuidString.prefix(8))"
+        unknownProfiles[newUnknownId] = UnknownProfile(
+            id: newUnknownId,
+            centroid: embedding,
+            samples: 1,
+            lastSeenTime: timestamp,
+            averageQuality: quality
+        )
+        unknownOwner[newUnknownId] = track.trackId
+        return UnknownIdentityMatch(
+            id: newUnknownId,
+            source: .identity,
+            confidence: quality,
+            similarityTop1: top1?.similarity ?? 0,
+            similarityTop2: top2.similarity,
+            margin: margin
+        )
+    }
+
+    private func canAssignUnknown(_ unknownId: String, to trackId: String) -> Bool {
+        guard let ownerTrackId = unknownOwner[unknownId] else { return true }
+        if ownerTrackId == trackId { return true }
+        if activeTracks[ownerTrackId] == nil {
+            unknownOwner[unknownId] = trackId
+            return true
+        }
+        return false
+    }
+
+    private func updateUnknownProfile(
+        _ profile: UnknownProfile,
+        with embedding: [Float],
+        quality: Float,
+        timestamp: TimeInterval
+    ) -> UnknownProfile {
+        let sampleCount = max(1, profile.samples)
+        let alpha = 1.0 / Float(sampleCount + 1)
+        let centroid = blendEmbeddings(
+            old: profile.centroid,
+            next: embedding,
+            alpha: alpha
+        )
+        let avgQuality = ((profile.averageQuality * Float(sampleCount)) + quality) / Float(sampleCount + 1)
+        return UnknownProfile(
+            id: profile.id,
+            centroid: centroid,
+            samples: sampleCount + 1,
+            lastSeenTime: timestamp,
+            averageQuality: avgQuality
+        )
+    }
+
+    private func blendEmbeddings(old: [Float], next: [Float], alpha: Float) -> [Float] {
+        guard old.count == next.count, !old.isEmpty else { return next }
+        var blended = [Float](repeating: 0, count: old.count)
+        for idx in old.indices {
+            blended[idx] = ((1.0 - alpha) * old[idx]) + (alpha * next[idx])
+        }
+        return FaceEmbedder.l2Normalize(blended)
+    }
+
+    private func canAssignIdentity(_ identityId: String, to track: FaceTrack, with match: MatchResult) -> Bool {
+        guard let ownerTrackId = identityOwner[identityId] else {
+            return true
+        }
+        guard ownerTrackId != track.trackId else {
+            return true
+        }
+        identityConflictsObserved += 1
+        guard let ownerTrack = activeTracks[ownerTrackId], ownerTrack.state != .exited else {
+            identityOwner[identityId] = track.trackId
+            identityConflictsResolved += 1
+            return true
+        }
+
+        // Single-owner policy: higher confidence claim wins.
+        let ownerConfidence = ownerTrack.recognitionConfidence
+        if match.confidence > ownerConfidence + 0.01 {
+            let leftResult = MatchResult(
+                identityId: identityId,
+                confidence: ownerTrack.recognitionConfidence,
+                similarityTop1: ownerTrack.recognitionConfidence,
+                similarityTop2: 0,
+                margin: 0,
+                reason: .matched
+            )
+            let leftUserId = UserIdJson(type: .enrolled, id: identityId, source: .identity)
+            emitEvent(
+                track: ownerTrack,
+                eventType: .personLeft,
+                userId: leftUserId,
+                matchResult: leftResult,
+                timestamp: max(ownerTrack.lastSeenTime, track.lastSeenTime)
+            )
+            clearIdentityOwnership(for: ownerTrackId)
+            ownerTrack.matchedIdentityId = nil
+            ownerTrack.recognitionConfidence = 0
+            ownerTrack.consecutiveMatches = 0
+            ownerTrack.consecutiveMatchIdentity = nil
+            ownerTrack.state = .candidate
+            ownerTrack.didEmitEnteredEvent = false
+            identityOwner[identityId] = track.trackId
+            identityConflictsResolved += 1
+            return true
+        }
+
+        identityConflictsSuppressed += 1
+        return false
     }
 
     private func emitEvent(

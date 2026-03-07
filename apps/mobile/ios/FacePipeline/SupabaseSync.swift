@@ -139,6 +139,152 @@ final class SupabaseSync {
         performWrite(request: request, completion: completion)
     }
 
+    // MARK: - Person Event Sync
+
+    /// Insert a person event row (fire-and-forget).
+    func insertPersonEvent(_ event: PersonEvent) {
+        let urlString = "\(supabaseUrl)/rest/v1/person_events"
+        guard let url = URL(string: urlString) else { return }
+
+        let body: [String: Any] = [
+            "track_id": event.trackId,
+            "event_type": event.eventType.rawValue,
+            "user_type": event.userId.type.rawValue,
+            "user_id": event.userId.id,
+            "source": event.userId.source.rawValue,
+            "confidence": event.confidence,
+            "bearing": event.bearing,
+            "distance_proxy": event.distanceProxy,
+            "similarity_top1": event.similarityTop1,
+            "similarity_top2": event.similarityTop2,
+            "margin": event.margin,
+            "timestamp_ms": event.timestampMs
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        applyAuthHeaders(&request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch { return }
+
+        session.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
+    /// Upsert a persons registry row (fire-and-forget).
+    func upsertPerson(userId: String, userType: String, displayName: String?, confidence: Float) {
+        let urlString = "\(supabaseUrl)/rest/v1/persons?on_conflict=user_id"
+        guard let url = URL(string: urlString) else { return }
+
+        var body: [String: Any] = [
+            "user_id": userId,
+            "user_type": userType,
+            "last_seen_at": ISO8601DateFormatter().string(from: Date()),
+            "last_confidence": confidence
+        ]
+        if let displayName {
+            body["display_name"] = displayName
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        applyAuthHeaders(&request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("resolution=merge-duplicates,return=minimal", forHTTPHeaderField: "Prefer")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch { return }
+
+        session.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
+    /// Update the visible_users ledger: upsert on entered/updated, delete on left (fire-and-forget).
+    func syncVisibleUser(_ event: PersonEvent) {
+        let userId = event.userId.id
+
+        if event.eventType == .personLeft {
+            // DELETE from visible_users
+            let urlString = "\(supabaseUrl)/rest/v1/visible_users?user_id=eq.\(userId)"
+            guard let url = URL(string: urlString) else { return }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            applyAuthHeaders(&request)
+
+            session.dataTask(with: request) { _, _, _ in }.resume()
+            return
+        }
+
+        // On person_entered, clear any previous visible_user for this track (handles identity transitions)
+        if event.eventType == .personEntered {
+            let clearUrlString = "\(supabaseUrl)/rest/v1/visible_users?track_id=eq.\(event.trackId)"
+            if let clearUrl = URL(string: clearUrlString) {
+                var clearRequest = URLRequest(url: clearUrl)
+                clearRequest.httpMethod = "DELETE"
+                applyAuthHeaders(&clearRequest)
+                session.dataTask(with: clearRequest) { _, _, _ in }.resume()
+            }
+        }
+
+        // UPSERT for entered/updated
+        let urlString = "\(supabaseUrl)/rest/v1/visible_users?on_conflict=user_id"
+        guard let url = URL(string: urlString) else { return }
+
+        let body: [String: Any] = [
+            "user_id": userId,
+            "user_type": event.userId.type.rawValue,
+            "track_id": event.trackId,
+            "confidence": event.confidence,
+            "bearing": event.bearing,
+            "distance_proxy": event.distanceProxy,
+            "updated_at": ISO8601DateFormatter().string(from: Date())
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        applyAuthHeaders(&request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("resolution=merge-duplicates,return=minimal", forHTTPHeaderField: "Prefer")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch { return }
+
+        session.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
+    // MARK: - Scene Description Sync
+
+    /// Upsert the current scene description (fire-and-forget).
+    func syncSceneDescription(_ scene: SceneDescription) {
+        let urlString = "\(supabaseUrl)/rest/v1/scene_descriptions?on_conflict=id"
+        guard let url = URL(string: urlString) else { return }
+
+        let body: [String: Any] = [
+            "id": 1,
+            "description": scene.description,
+            "model": scene.model,
+            "timestamp_ms": scene.timestampMs,
+            "updated_at": ISO8601DateFormatter().string(from: Date())
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        applyAuthHeaders(&request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("resolution=merge-duplicates,return=minimal", forHTTPHeaderField: "Prefer")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch { return }
+
+        session.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
     // MARK: - Helpers
 
     private func applyAuthHeaders(_ request: inout URLRequest) {

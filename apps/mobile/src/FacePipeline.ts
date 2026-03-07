@@ -26,10 +26,19 @@ export interface PersonEvent {
   timestamp_ms: number;
 }
 
+export interface SceneDescriptionEvent {
+  description: string;
+  timestamp_ms: number;
+  model: string;
+}
+
 export interface StartPipelineConfig {
   detectEveryNFrames?: number;
   supabaseUrl?: string;
   supabaseAnonKey?: string;
+  geminiApiKey?: string;
+  sceneDescriptionIntervalSeconds?: number;
+  geminiModel?: string;
 }
 
 export interface EnrollContactInput {
@@ -93,6 +102,7 @@ const emitter =
 type PersonEventListener = (event: PersonEvent) => void;
 type EnrollmentProgressListener = (progress: EnrollmentProgress) => void;
 type EnrollmentCompleteListener = (result: EnrollmentResult) => void;
+type SceneDescriptionListener = (event: SceneDescriptionEvent) => void;
 type ErrorListener = (error: PipelineErrorEvent) => void;
 
 export const FacePipeline = {
@@ -101,6 +111,9 @@ export const FacePipeline = {
       detectEveryNFrames: config.detectEveryNFrames ?? 4,
       supabaseUrl: config.supabaseUrl,
       supabaseAnonKey: config.supabaseAnonKey,
+      geminiApiKey: config.geminiApiKey,
+      sceneDescriptionIntervalSeconds: config.sceneDescriptionIntervalSeconds,
+      geminiModel: config.geminiModel,
     });
   },
 
@@ -130,6 +143,12 @@ export const FacePipeline = {
     listener: EnrollmentCompleteListener
   ): EmitterSubscription | undefined => {
     return emitter?.addListener('onEnrollmentComplete', listener);
+  },
+
+  onSceneDescription: (
+    listener: SceneDescriptionListener
+  ): EmitterSubscription | undefined => {
+    return emitter?.addListener('onSceneDescription', listener);
   },
 
   onError: (listener: ErrorListener): EmitterSubscription | undefined => {

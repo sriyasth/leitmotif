@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Models (large binary files)
+models/
+
+# Test videos (large binary files)
+testvideos/
+
+# Build output
+build/
+dist/
+*.xcarchive
+DerivedData/

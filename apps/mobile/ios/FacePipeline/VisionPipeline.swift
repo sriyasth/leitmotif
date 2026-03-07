@@ -43,6 +43,7 @@ final class VisionPipeline {
     private let trackingConfidenceThreshold: VNConfidence = 0.3
     private let detectionToTrackIoUThreshold: CGFloat = 0.35
     private let trackRetentionSec: TimeInterval = 2.0
+    private let maxTrackPredictionGapSec: TimeInterval = 0.8
 
     init(config: PipelineConfig) {
         self.frameScheduler = FrameScheduler(detectEveryNFrames: config.detectEveryNFrames)
@@ -107,8 +108,10 @@ final class VisionPipeline {
         let landmarkObservations = landmarksRequest.results ?? []
         var samples: [TrackedFaceSample] = []
 
-        for face in detectedFaces {
-            let trackId = resolveTrackId(for: face)
+        let assignments = assignDetectionsToTracks(detectedFaces, timestamp: timestamp)
+        for assignment in assignments {
+            let face = assignment.face
+            let trackId = assignment.trackId
             refreshVisionTrack(trackId: trackId, with: face, timestamp: timestamp)
 
             let qualityScore = qualityForFace(face, qualityObservations: qualityObservations)
@@ -164,7 +167,8 @@ final class VisionPipeline {
                 continue
             }
 
-            guard let result = request.results?.first, result.confidence >= trackingConfidenceThreshold else {
+            guard let result = request.results?.first as? VNDetectedObjectObservation,
+                  result.confidence >= trackingConfidenceThreshold else {
                 continue
             }
 
@@ -200,20 +204,73 @@ final class VisionPipeline {
 
     // MARK: - Track Mapping
 
-    private func resolveTrackId(for observation: VNFaceObservation) -> String {
-        let incomingBox = observation.boundingBox
-        var bestTrackId: String?
-        var bestIoU: CGFloat = detectionToTrackIoUThreshold
+    private struct DetectionAssignment {
+        let face: VNFaceObservation
+        let trackId: String
+    }
 
-        for (trackId, track) in activeTracks {
-            let iou = computeIoU(incomingBox, track.lastObservation.boundingBox)
-            if iou > bestIoU {
-                bestIoU = iou
-                bestTrackId = trackId
+    private struct AssignmentCandidate {
+        let trackId: String
+        let detectionIndex: Int
+        let iou: CGFloat
+        let score: CGFloat
+    }
+
+    private func assignDetectionsToTracks(_ detections: [VNFaceObservation], timestamp: TimeInterval) -> [DetectionAssignment] {
+        guard !detections.isEmpty else { return [] }
+
+        let eligibleTracks = activeTracks.values.filter {
+            timestamp - $0.lastSeenTimestamp <= maxTrackPredictionGapSec
+        }
+
+        var candidates: [AssignmentCandidate] = []
+        candidates.reserveCapacity(eligibleTracks.count * detections.count)
+
+        for track in eligibleTracks {
+            for (detIndex, detection) in detections.enumerated() {
+                let iou = computeIoU(track.lastObservation.boundingBox, detection.boundingBox)
+                guard iou >= detectionToTrackIoUThreshold else { continue }
+                // Add slight recency bias to prefer fresh track hypotheses at tie IoU.
+                let recency = CGFloat(max(0, 1.0 - min(1.0, timestamp - track.lastSeenTimestamp)))
+                let score = iou + (0.01 * recency)
+                candidates.append(
+                    AssignmentCandidate(
+                        trackId: track.trackId,
+                        detectionIndex: detIndex,
+                        iou: iou,
+                        score: score
+                    )
+                )
             }
         }
 
-        return bestTrackId ?? UUID().uuidString
+        // Greedy deterministic one-to-one matching.
+        candidates.sort {
+            if $0.score != $1.score { return $0.score > $1.score }
+            if $0.iou != $1.iou { return $0.iou > $1.iou }
+            if $0.trackId != $1.trackId { return $0.trackId < $1.trackId }
+            return $0.detectionIndex < $1.detectionIndex
+        }
+
+        var usedTracks = Set<String>()
+        var usedDetections = Set<Int>()
+        var detectionToTrack: [Int: String] = [:]
+
+        for candidate in candidates {
+            guard !usedTracks.contains(candidate.trackId) else { continue }
+            guard !usedDetections.contains(candidate.detectionIndex) else { continue }
+            usedTracks.insert(candidate.trackId)
+            usedDetections.insert(candidate.detectionIndex)
+            detectionToTrack[candidate.detectionIndex] = candidate.trackId
+        }
+
+        var assignments: [DetectionAssignment] = []
+        assignments.reserveCapacity(detections.count)
+        for (index, detection) in detections.enumerated() {
+            let trackId = detectionToTrack[index] ?? UUID().uuidString
+            assignments.append(DetectionAssignment(face: detection, trackId: trackId))
+        }
+        return assignments
     }
 
     private func refreshVisionTrack(trackId: String, with observation: VNFaceObservation, timestamp: TimeInterval) {

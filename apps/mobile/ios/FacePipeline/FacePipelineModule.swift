@@ -13,9 +13,12 @@ class FacePipelineModule: RCTEventEmitter {
     private var faceMatcher: FaceMatcher?
     private var enrollmentManager: EnrollmentManager?
     private var supabaseSync: SupabaseSync?
+    private var sceneDescriber: SceneDescriber?
 
     private var isRunning = false
     private var hasListeners = false
+    private var visibleUserIds: [String: String] = [:] // trackId -> userId
+    private var currentSceneDescription: String = ""
 
     private var enrollmentResolver: RCTPromiseResolveBlock?
     private var enrollmentRejecter: RCTPromiseRejectBlock?
@@ -25,7 +28,7 @@ class FacePipelineModule: RCTEventEmitter {
     override static func requiresMainQueueSetup() -> Bool { false }
 
     override func supportedEvents() -> [String] {
-        ["onPersonEvent", "onPipelineError", "onEnrollmentProgress", "onEnrollmentComplete"]
+        ["onPersonEvent", "onPipelineError", "onEnrollmentProgress", "onEnrollmentComplete", "onSceneDescription"]
     }
 
     override func startObserving() { hasListeners = true }
@@ -79,6 +82,13 @@ class FacePipelineModule: RCTEventEmitter {
         )
         enrollmentManager?.delegate = self
 
+        if let geminiKey = resolveGeminiApiKey(from: options) {
+            let interval = options["sceneDescriptionIntervalSeconds"] as? TimeInterval ?? config.sceneDescriptionIntervalSeconds
+            let model = options["geminiModel"] as? String ?? config.geminiModel
+            sceneDescriber = SceneDescriber(apiKey: geminiKey, intervalSeconds: interval, model: model)
+            sceneDescriber?.delegate = self
+        }
+
         visionPipeline = VisionPipeline(config: config)
         visionPipeline?.delegate = self
 
@@ -88,6 +98,7 @@ class FacePipelineModule: RCTEventEmitter {
         do {
             try captureManager?.configure(resolution: .hd1280x720)
             captureManager?.start()
+            sceneDescriber?.start()
             isRunning = true
             resolver(["status": "started"])
         } catch {
@@ -100,6 +111,7 @@ class FacePipelineModule: RCTEventEmitter {
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
         captureManager?.stop()
+        sceneDescriber?.stop()
         visionPipeline?.reset()
         trackManager?.reset()
         enrollmentManager?.cancelEnrollment()
@@ -179,6 +191,13 @@ class FacePipelineModule: RCTEventEmitter {
         emitEvent(name: "onPipelineError", body: ["message": message])
     }
 
+    private func resolveGeminiApiKey(from options: NSDictionary) -> String? {
+        let optionKey = options["geminiApiKey"] as? String
+        let envKey = ProcessInfo.processInfo.environment["EXPO_PUBLIC_GEMINI_API_KEY"]
+        guard let key = optionKey ?? envKey, !key.isEmpty else { return nil }
+        return key
+    }
+
     private func resolveSupabaseConfig(from options: NSDictionary) -> (url: String, anonKey: String)? {
         let optionUrl = options["supabaseUrl"] as? String
         let optionKey = options["supabaseAnonKey"] as? String
@@ -204,6 +223,10 @@ extension FacePipelineModule: CaptureManagerDelegate {
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
         visionPipeline?.processFrame(sampleBuffer, timestamp: timestamp)
         trackManager?.pruneStale(currentTime: timestamp)
+
+        if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            sceneDescriber?.updateLatestFrame(pixelBuffer)
+        }
     }
 }
 
@@ -249,6 +272,14 @@ extension FacePipelineModule: VisionPipelineDelegate {
             }
         }
     }
+
+    private func writeVisibleUsersFile() {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let fileUrl = docs.appendingPathComponent("visible_users.txt")
+        let csv = visibleUserIds.values.joined(separator: ",")
+        let content = "visible_users: \(csv)\nscene_description: \(currentSceneDescription)"
+        try? content.write(to: fileUrl, atomically: true, encoding: .utf8)
+    }
 }
 
 // MARK: - TrackManagerDelegate
@@ -256,6 +287,25 @@ extension FacePipelineModule: VisionPipelineDelegate {
 extension FacePipelineModule: TrackManagerDelegate {
     func trackManager(_ manager: TrackManager, didEmitEvent event: PersonEvent) {
         emitEvent(name: "onPersonEvent", body: event.toDictionary())
+
+        // Sync to Supabase (fire-and-forget)
+        supabaseSync?.insertPersonEvent(event)
+        supabaseSync?.upsertPerson(
+            userId: event.userId.id,
+            userType: event.userId.type.rawValue,
+            displayName: nil,
+            confidence: event.confidence
+        )
+        supabaseSync?.syncVisibleUser(event)
+
+        // Update local visible_users file
+        switch event.eventType {
+        case .personEntered, .personUpdated:
+            visibleUserIds[event.trackId] = event.userId.id
+        case .personLeft:
+            visibleUserIds.removeValue(forKey: event.trackId)
+        }
+        writeVisibleUsersFile()
     }
 }
 
@@ -278,5 +328,20 @@ extension FacePipelineModule: EnrollmentManagerDelegate {
 
     func enrollmentManager(_ manager: EnrollmentManager, didCaptureSample count: Int, of total: Int) {
         emitEvent(name: "onEnrollmentProgress", body: ["captured": count, "target": total])
+    }
+}
+
+// MARK: - SceneDescriberDelegate
+
+extension FacePipelineModule: SceneDescriberDelegate {
+    func sceneDescriber(_ describer: SceneDescriber, didDescribeScene description: SceneDescription) {
+        emitEvent(name: "onSceneDescription", body: description.toDictionary())
+        supabaseSync?.syncSceneDescription(description)
+        currentSceneDescription = description.description
+        writeVisibleUsersFile()
+    }
+
+    func sceneDescriber(_ describer: SceneDescriber, didFailWithError error: Error) {
+        emitError("Scene description failed: \(error.localizedDescription)")
     }
 }

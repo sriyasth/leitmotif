@@ -20,6 +20,7 @@ import os
 from typing import Dict, Any
 
 import torch
+import torch.nn as nn
 import coremltools as ct
 
 
@@ -41,17 +42,26 @@ def parse_args() -> argparse.Namespace:
         choices=["iOS15", "iOS16", "iOS17", "iOS18"],
         help="CoreML minimum iOS deployment target",
     )
+    parser.add_argument(
+        "--adaface-repo",
+        default=None,
+        help="Path to AdaFace repo containing net.py (optional)",
+    )
     return parser.parse_args()
 
 
 def deployment_target(target: str):
-    mapping = {
-        "iOS15": ct.target.iOS15,
-        "iOS16": ct.target.iOS16,
-        "iOS17": ct.target.iOS17,
-        "iOS18": ct.target.iOS18,
-    }
-    return mapping[target]
+    if target == "iOS15":
+        return ct.target.iOS15
+    if target == "iOS16":
+        return ct.target.iOS16
+    if target == "iOS17":
+        return ct.target.iOS17
+    if target == "iOS18":
+        if not hasattr(ct.target, "iOS18"):
+            raise RuntimeError("coremltools build does not support iOS18 target")
+        return ct.target.iOS18
+    raise RuntimeError(f"unsupported target: {target}")
 
 
 def clean_state_dict(raw_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -65,13 +75,20 @@ def clean_state_dict(raw_state: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
-def load_adaface_model(checkpoint_path: str):
+def load_adaface_model(checkpoint_path: str, adaface_repo: str | None = None):
+    if adaface_repo:
+        import sys
+        sys.path.insert(0, adaface_repo)
+
     try:
-        from adaface import net
+        from adaface import net  # type: ignore
     except ImportError as exc:
-        raise RuntimeError(
-            "Could not import `adaface.net`. Clone/install AdaFace and expose it on PYTHONPATH."
-        ) from exc
+        try:
+            import net  # type: ignore
+        except ImportError:
+            raise RuntimeError(
+                "Could not import AdaFace net.py. Provide --adaface-repo or install module."
+            ) from exc
 
     model = net.build_model("ir_50")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -98,20 +115,41 @@ def load_adaface_model(checkpoint_path: str):
 
 
 def convert_to_coreml(model, output_path: str, minimum_target) -> None:
+    class EmbeddingOnly(nn.Module):
+        def __init__(self, backbone: nn.Module):
+            super().__init__()
+            self.backbone = backbone
+
+        def forward(self, x):
+            out = self.backbone(x)
+            if isinstance(out, tuple):
+                return out[0]
+            return out
+
+    export_model = EmbeddingOnly(model).eval()
+
     dummy = torch.randn(1, 3, 112, 112)
     with torch.no_grad():
-        out = model(dummy)
+        out = export_model(dummy)
 
     output_dim = int(out.shape[-1]) if hasattr(out, "shape") else None
     if output_dim != 512:
         print(f"Warning: expected 512-dim embedding, got {output_dim}")
 
-    traced = torch.jit.trace(model, dummy)
+    traced = torch.jit.trace(export_model, dummy)
     traced = torch.jit.freeze(traced.eval())
 
     mlmodel = ct.convert(
         traced,
-        inputs=[ct.TensorType(name="face_image", shape=(1, 3, 112, 112))],
+        inputs=[
+            ct.ImageType(
+                name="face_image",
+                shape=(1, 3, 112, 112),
+                scale=1 / 127.5,
+                bias=[-1.0, -1.0, -1.0],
+                color_layout=ct.colorlayout.RGB,
+            )
+        ],
         outputs=[ct.TensorType(name="embedding")],
         minimum_deployment_target=minimum_target,
         convert_to="mlprogram",
@@ -137,8 +175,10 @@ def validate_output(output_path: str) -> None:
     for out in spec.description.output:
         print(f"  - {out.name}")
 
-    test_input = torch.randn(1, 3, 112, 112).numpy().astype("float32")
-    prediction = model.predict({"face_image": test_input})
+    import numpy as np
+    from PIL import Image
+    test_input = (np.random.rand(112, 112, 3) * 255).astype("uint8")
+    prediction = model.predict({"face_image": Image.fromarray(test_input, mode="RGB")})
     embedding = prediction.get("embedding")
     if embedding is None:
         raise RuntimeError("Converted model does not return `embedding` output")
@@ -155,7 +195,7 @@ def main() -> int:
         return 1
 
     print("Loading AdaFace model...")
-    model = load_adaface_model(args.checkpoint)
+    model = load_adaface_model(args.checkpoint, args.adaface_repo)
 
     target = deployment_target(args.deployment_target)
     print(f"Converting to CoreML with minimum target {args.deployment_target}...")
