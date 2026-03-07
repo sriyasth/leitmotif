@@ -1,0 +1,17 @@
+# env
+.env
+.env.local
+.env*.local
+
+# deps
+node_modules/
+
+# build
+dist/
+*.js.map
+
+# audio output
+*.wav
+
+# os
+.DS_Store
