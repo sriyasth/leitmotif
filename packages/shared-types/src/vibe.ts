@@ -13,3 +13,13 @@ export type VibeResponse = {
   descriptors: string[]
   timestamp: number
 }
+
+export type SceneContext = {
+  environment: string
+  people_count: number
+  activity: string
+  motion_level: "none" | "low" | "moderate" | "high"
+  lighting: "dark" | "dim" | "neutral" | "warm" | "bright"
+  scene_stability: "stable" | "changing" | "volatile"
+  descriptors: string[]
+}
