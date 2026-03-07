@@ -1,0 +1,5 @@
+{
+  "name": "sensible",
+  "private": true,
+  "workspaces": ["packages/*", "services/*"]
+}
