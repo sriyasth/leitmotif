@@ -1,0 +1,155 @@
+---
+
+## API Contracts
+
+These are the interfaces that connect all three team members. Share these with Aaron and Sriya so everyone builds to the same spec.
+
+### Contract 1: Frontend → Aaron (Frame Submission)
+
+**Endpoint:** `POST /api/vision/frames`
+
+**Request:**
+```json
+{
+  "session_id": "uuid-string",
+  "timestamp": 1720000000,
+  "frame": "base64-encoded-jpeg-string",
+  "frame_index": 42
+}
+```
+
+**Response:**
+```json
+{
+  "session_id": "uuid-string",
+  "timestamp": 1720000000,
+  "entities": [
+    {
+      "entity_id": "user_abc123",
+      "type": "known_person",
+      "name": "Sarah",
+      "bounding_box": { "x": 120, "y": 80, "w": 200, "h": 350 },
+      "position": { "distance_m": 2.3, "angle_deg": -15 },
+      "confidence": 0.92,
+      "leitmotif_description": "A warm, gentle 4-bar melodic phrase in C major, mid-tempo, acoustic piano with soft strings, evoking calm familiarity",
+      "state": "present"
+    },
+    {
+      "entity_id": "unknown_face_7f2a",
+      "type": "unknown_person",
+      "name": null,
+      "bounding_box": { "x": 400, "y": 100, "w": 180, "h": 320 },
+      "position": { "distance_m": 3.1, "angle_deg": 20 },
+      "confidence": 0.88,
+      "leitmotif_description": "A curious, bright 4-bar phrase in G major, upbeat, xylophone with light synth pads, evoking intrigue and novelty",
+      "state": "entering"
+    }
+  ],
+  "departed_entities": ["user_xyz789"],
+  "scene_context": "Two people in a living room, one just arrived at the doorway"
+}
+```
+
+**Notes for Aaron:**
+- Frames will arrive at roughly 5 FPS (configurable). Process what you can, skip if overloaded.
+- `state` values: `"entering"`, `"present"`, `"moving"`, `"exiting"`
+- `departed_entities` lists entity IDs that were present in the previous frame but are now gone.
+- `leitmotif_description` is a natural language string that Sriya will feed directly to Lyria.
+- For unknown persons, generate the description from visual features (build, demeanor, clothing, etc.).
+
+### Contract 2: Frontend → Sriya (Motif Request)
+
+**Endpoint:** `POST /api/audio/generate`
+
+**Request:**
+```json
+{
+  "entity_id": "user_abc123",
+  "leitmotif_description": "A warm, gentle 4-bar melodic phrase in C major, mid-tempo, acoustic piano with soft strings, evoking calm familiarity",
+  "duration_sec": 4,
+  "loopable": true
+}
+```
+
+**Response:**
+```json
+{
+  "entity_id": "user_abc123",
+  "audio_url": "https://your-cdn.com/motifs/user_abc123.wav",
+  "duration_sec": 3.8,
+  "format": "wav",
+  "cached": true
+}
+```
+
+**Notes for Sriya:**
+- If a motif for this `entity_id` already exists and is cached, return it immediately (skip Lyria generation).
+- For new/unknown entities, generate in real-time. Target under 2 seconds for generation.
+- Audio format: WAV preferred for low-latency playback, MP3 acceptable as fallback.
+- The frontend will handle looping, spatial panning, and volume modulation.
+
+### Contract 3: Contact Registration
+
+**Endpoint:** `POST /api/contacts/register`
+
+**Request:**
+```json
+{
+  "name": "Sarah",
+  "photo": "base64-encoded-jpeg",
+  "custom_description": "My best friend, likes jazz and warm tones"
+}
+```
+
+**Response:**
+```json
+{
+  "entity_id": "user_abc123",
+  "name": "Sarah",
+  "leitmotif_description": "A jazzy, warm 4-bar phrase in Bb major...",
+  "motif_url": "https://your-cdn.com/motifs/user_abc123.wav",
+  "status": "registered"
+}
+```
+
+### Contract 4: WebSocket (Real-Time Events)
+
+For the live demo, a WebSocket connection keeps things snappy.
+
+**WS Endpoint:** `ws://your-server/ws/session/{session_id}`
+
+**Server → Frontend messages:**
+```json
+{
+  "event": "entities_update",
+  "data": {
+    "entities": [ /* same shape as Contract 1 response entities */ ],
+    "departed_entities": ["user_xyz789"],
+    "scene_context": "..."
+  }
+}
+```
+
+```json
+{
+  "event": "motif_ready",
+  "data": {
+    "entity_id": "user_abc123",
+    "audio_url": "https://...",
+    "cached": false
+  }
+}
+```
+
+**Frontend → Server messages:**
+```json
+{
+  "event": "frame",
+  "data": {
+    "frame": "base64-jpeg",
+    "timestamp": 1720000000
+  }
+}
+```
+
+---
