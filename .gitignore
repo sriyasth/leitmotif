@@ -1,20 +1,3 @@
-# env
-.env
-.env.local
-.env*.local
-
-# deps
-node_modules/
-
-# build
-dist/
-*.js.map
-
-# audio output
-*.wav
-
-# os
-.DS_Store
 # Dependencies
 node_modules/
 
@@ -22,6 +5,17 @@ node_modules/
 .env
 .env.local
 .env.*.local
+*.local
+
+# Build output
+dist/
+build/
+*.js.map
+*.xcarchive
+DerivedData/
+
+# Audio output
+*.wav
 
 # macOS
 .DS_Store
@@ -38,12 +32,3 @@ models/
 
 # Test videos (large binary files)
 testvideos/
-
-# Build output
-build/
-dist/
-*.xcarchive
-DerivedData/
-
-
-node_modules/

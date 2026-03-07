@@ -1,0 +1,952 @@
+import { useState, useEffect, useRef, useCallback, useReducer, createContext, useContext } from "react";
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+const initialState = {
+  currentScreen: "monitor",
+  session: { id: crypto.randomUUID(), status: "idle", fps: 0, mode: "live", recording: false, recordTime: 0 },
+  entities: {},
+  departedEntities: [],
+  contacts: {
+    contact_sarah: { id: "contact_sarah", name: "Sarah", status: "connected", motifFreq: 440, motifDescription: "Warm piano in C major" },
+    contact_marcus: { id: "contact_marcus", name: "Marcus", status: "standby", motifFreq: 523, motifDescription: "Bright xylophone in G major" },
+    contact_elena: { id: "contact_elena", name: "Elena", status: "disconnected", motifFreq: 349, motifDescription: "Gentle strings in F major" },
+  },
+  audioEngine: { masterVolume: 0.82, spatializationEnabled: true, crowdThreshold: 5, crowdModeActive: false },
+  connections: {
+    vision: { status: "disconnected", latency: null },
+    audio: { status: "disconnected", latency: null },
+    ws: { status: "disconnected" },
+  },
+  demoMode: true,
+  demoTime: 0,
+};
+
+function reducer(state, action) {
+  switch (action.type) {
+    case "SET_SCREEN": return { ...state, currentScreen: action.payload };
+    case "SET_SESSION": return { ...state, session: { ...state.session, ...action.payload } };
+    case "UPDATE_ENTITIES": return { ...state, entities: action.payload.entities, departedEntities: action.payload.departed || [] };
+    case "SET_AUDIO": return { ...state, audioEngine: { ...state.audioEngine, ...action.payload } };
+    case "SET_CONNECTIONS": return { ...state, connections: { ...state.connections, ...action.payload } };
+    case "TOGGLE_DEMO": return { ...state, demoMode: !state.demoMode };
+    case "SET_DEMO_TIME": return { ...state, demoTime: action.payload };
+    case "ADD_CONTACT": return { ...state, contacts: { ...state.contacts, [action.payload.id]: action.payload } };
+    case "SET_RECORDING": return { ...state, session: { ...state.session, recording: action.payload } };
+    case "SET_RECORD_TIME": return { ...state, session: { ...state.session, recordTime: action.payload } };
+    default: return state;
+  }
+}
+
+const AppContext = createContext();
+const useApp = () => useContext(AppContext);
+
+// ============================================================
+// AUDIO ENGINE (Web Audio API)x
+// ============================================================
+class SpatialAudioEngine {
+  constructor() {
+    this.ctx = null;
+    this.masterGain = null;
+    this.sources = {};
+    this.initialized = false;
+  }
+
+  init() {
+    if (this.initialized) return;
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.connect(this.ctx.destination);
+    this.masterGain.gain.value = 0.82;
+    this.initialized = true;
+  }
+
+  setMasterVolume(v) {
+    if (this.masterGain) this.masterGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.1);
+  }
+
+  playEntity(entityId, freq, angleDeg, distanceM) {
+    if (!this.initialized) this.init();
+    if (this.sources[entityId]) return this.updateEntity(entityId, angleDeg, distanceM);
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const panner = this.ctx.createStereoPanner();
+
+    // Unique tone: base freq + harmonics
+    osc.type = "sine";
+    osc.frequency.value = freq;
+
+    // Spatial panning from angle (-90 to 90 -> -1 to 1)
+    panner.pan.value = Math.max(-1, Math.min(1, angleDeg / 90));
+
+    // Distance attenuation
+    const distGain = Math.max(0.05, 1 / (1 + distanceM * 0.5));
+    gain.gain.value = 0;
+
+    osc.connect(gain);
+    gain.connect(panner);
+    panner.connect(this.masterGain);
+    osc.start();
+
+    // Fade in over 500ms
+    gain.gain.setTargetAtTime(distGain, this.ctx.currentTime, 0.15);
+
+    this.sources[entityId] = { osc, gain, panner, freq };
+  }
+
+  updateEntity(entityId, angleDeg, distanceM) {
+    const src = this.sources[entityId];
+    if (!src) return;
+    src.panner.pan.setTargetAtTime(Math.max(-1, Math.min(1, angleDeg / 90)), this.ctx.currentTime, 0.1);
+    const distGain = Math.max(0.05, 1 / (1 + distanceM * 0.5));
+    src.gain.gain.setTargetAtTime(distGain, this.ctx.currentTime, 0.1);
+  }
+
+  departEntity(entityId) {
+    const src = this.sources[entityId];
+    if (!src) return;
+    // Pitch shift down + fade out for departure
+    src.osc.frequency.setTargetAtTime(src.freq * 0.7, this.ctx.currentTime, 0.3);
+    src.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.4);
+    setTimeout(() => {
+      try { src.osc.stop(); } catch (e) {}
+      delete this.sources[entityId];
+    }, 1500);
+  }
+
+  stopAll() {
+    Object.keys(this.sources).forEach(id => {
+      try { this.sources[id].osc.stop(); } catch (e) {}
+    });
+    this.sources = {};
+  }
+
+  playPreview(freq) {
+    if (!this.initialized) this.init();
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gain.gain.value = 0.3;
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start();
+    gain.gain.setTargetAtTime(0, this.ctx.currentTime + 1.5, 0.3);
+    setTimeout(() => { try { osc.stop(); } catch(e){} }, 2500);
+  }
+}
+
+const audioEngine = new SpatialAudioEngine();
+
+// ============================================================
+// DEMO MODE — Simulated Living Room Scene
+// ============================================================
+const DEMO_ENTITIES = {
+  sarah: { id: "demo_sarah", type: "known_person", name: "Sarah", motifFreq: 440, color: "blue" },
+  marcus: { id: "demo_marcus", type: "known_person", name: "Marcus", motifFreq: 523, color: "blue" },
+  unknown: { id: "demo_unknown", type: "unknown_person", name: "Unknown", motifFreq: 659, color: "amber" },
+  crowd1: { id: "demo_c1", type: "unknown_person", name: "Person 4", motifFreq: 587, color: "amber" },
+  crowd2: { id: "demo_c2", type: "unknown_person", name: "Person 5", motifFreq: 698, color: "amber" },
+  crowd3: { id: "demo_c3", type: "unknown_person", name: "Person 6", motifFreq: 784, color: "amber" },
+  table: { id: "demo_table", type: "object", name: "Table", motifFreq: 220, color: "gray" },
+};
+
+function getDemoState(t) {
+  // t in seconds, loops every 30s
+  const entities = {};
+  const departed = [];
+
+  // Table is always there
+  entities.demo_table = { ...DEMO_ENTITIES.table, position: { angle_deg: 5, distance_m: 1.2 }, boundingBox: { x: 40, y: 55, w: 25, h: 15 }, state: "present" };
+
+  if (t >= 3 && t < 18) {
+    // Sarah enters, approaches
+    const dist = t < 6 ? 3 - (t - 3) * 0.5 : 1.5;
+    const angle = t < 6 ? -30 + (t - 3) * 5 : -15;
+    entities.demo_sarah = { ...DEMO_ENTITIES.sarah, position: { angle_deg: angle, distance_m: dist }, boundingBox: { x: 15, y: 20, w: 20, h: 40 }, state: t < 6 ? "entering" : "present" };
+  }
+  if (t >= 18 && t < 21) departed.push("demo_sarah");
+
+  if (t >= 10 && t < 30) {
+    entities.demo_marcus = { ...DEMO_ENTITIES.marcus, position: { angle_deg: 25, distance_m: t < 13 ? 4 - (t - 10) * 0.5 : 2.5 }, boundingBox: { x: 65, y: 30, w: 18, h: 38 }, state: t < 13 ? "entering" : "present" };
+  }
+
+  if (t >= 21 && t < 30) {
+    entities.demo_unknown = { ...DEMO_ENTITIES.unknown, position: { angle_deg: 0, distance_m: 2 }, boundingBox: { x: 42, y: 25, w: 16, h: 35 }, state: t < 23 ? "entering" : "present" };
+  }
+
+  if (t >= 25) {
+    entities.demo_c1 = { ...DEMO_ENTITIES.crowd1, position: { angle_deg: -40, distance_m: 3.5 }, boundingBox: { x: 5, y: 35, w: 14, h: 30 }, state: "entering" };
+    entities.demo_c2 = { ...DEMO_ENTITIES.crowd2, position: { angle_deg: 35, distance_m: 4 }, boundingBox: { x: 80, y: 40, w: 14, h: 30 }, state: "entering" };
+    entities.demo_c3 = { ...DEMO_ENTITIES.crowd3, position: { angle_deg: -10, distance_m: 4.5 }, boundingBox: { x: 30, y: 45, w: 14, h: 28 }, state: "entering" };
+  }
+
+  return { entities, departed };
+}
+
+// ============================================================
+// CAMERA SERVICE
+// ============================================================
+function useCameraCapture(enabled) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(document.createElement("canvas"));
+  const streamRef = useRef(null);
+
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 } });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+    } catch (e) {
+      console.warn("Camera not available:", e);
+    }
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+  }, []);
+
+  const captureFrame = useCallback(() => {
+    if (!videoRef.current || !videoRef.current.videoWidth) return null;
+    const canvas = canvasRef.current;
+    canvas.width = 640;
+    canvas.height = 480;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(videoRef.current, 0, 0, 640, 480);
+    return canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+  }, []);
+
+  return { videoRef, startCamera, stopCamera, captureFrame };
+}
+
+// ============================================================
+// API SERVICES (Integration Layer)
+// ============================================================
+const API_CONFIG = {
+  visionBaseUrl: "http://localhost:8001",
+  audioBaseUrl: "http://localhost:8002",
+  wsUrl: "ws://localhost:8001/ws/session",
+};
+
+async function sendFrameToVision(sessionId, frame, frameIndex) {
+  try {
+    const res = await fetch(`${API_CONFIG.visionBaseUrl}/api/vision/frames`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, timestamp: Date.now(), frame, frame_index: frameIndex }),
+    });
+    return await res.json();
+  } catch (e) {
+    return null; // Fall back to demo mode
+  }
+}
+
+async function requestMotifGeneration(entityId, description) {
+  try {
+    const res = await fetch(`${API_CONFIG.audioBaseUrl}/api/audio/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entity_id: entityId, leitmotif_description: description, duration_sec: 4, loopable: true }),
+    });
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+// ============================================================
+// SHARED COMPONENTS
+// ============================================================
+const Icon = ({ name, className = "", filled = false }) => (
+  <span className={`material-symbols-outlined ${className}`} style={filled ? { fontVariationSettings: "'FILL' 1" } : {}}>
+    {name}
+  </span>
+);
+
+function BottomNav({ current, onNavigate }) {
+  const tabs = [
+    { id: "monitor", icon: "sensors", label: "Monitor" },
+    { id: "contacts", icon: "group", label: "Contacts" },
+    { id: "visualizer", icon: "insights", label: "Visualizer" },
+    { id: "settings", icon: "settings", label: "Settings" },
+  ];
+  return (
+    <div className="absolute bottom-0 left-0 w-full bg-[#0A0A0F]/90 backdrop-blur-xl border-t border-slate-800/50 pb-6 pt-3 px-4 z-50">
+      <div className="flex items-center justify-around">
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => onNavigate(t.id)}
+            className={`flex flex-col items-center gap-1 p-2 transition-colors min-w-[48px] ${current === t.id ? "text-[#ec5b13]" : "text-slate-500 hover:text-slate-300"}`}>
+            <Icon name={t.icon} filled={current === t.id} className="text-2xl" />
+            <span className="text-[10px] font-medium uppercase tracking-wider">{t.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SCREEN 1: LIVE MONITOR
+// ============================================================
+function MonitorScreen() {
+  const { state, dispatch } = useApp();
+  const { videoRef, startCamera, stopCamera, captureFrame } = useCameraCapture(true);
+  const [cameraActive, setCameraActive] = useState(false);
+  const frameCountRef = useRef(0);
+  const entities = state.entities;
+  const entityList = Object.values(entities);
+  const entityCount = entityList.length;
+
+  // Toggle recording / camera
+  const toggleRecording = async () => {
+    if (!audioEngine.initialized) audioEngine.init();
+    if (!state.session.recording) {
+      await startCamera();
+      if (state.demoMode) dispatch({ type: "TOGGLE_DEMO" });
+      setCameraActive(true);
+      dispatch({ type: "SET_RECORDING", payload: true });
+      dispatch({ type: "SET_SESSION", payload: { status: "live" } });
+    } else {
+      stopCamera();
+      setCameraActive(false);
+      audioEngine.stopAll();
+      dispatch({ type: "SET_RECORDING", payload: false });
+      dispatch({ type: "SET_SESSION", payload: { status: "idle" } });
+      dispatch({ type: "SET_RECORD_TIME", payload: 0 });
+    }
+  };
+
+  // Record timer
+  useEffect(() => {
+    if (!state.session.recording) return;
+    const iv = setInterval(() => dispatch({ type: "SET_RECORD_TIME", payload: state.session.recordTime + 1 }), 1000);
+    return () => clearInterval(iv);
+  }, [state.session.recording, state.session.recordTime]);
+
+  // Frame sending (when camera active + not demo mode)
+  useEffect(() => {
+    if (!cameraActive || state.demoMode) return;
+    const iv = setInterval(async () => {
+      const frame = captureFrame();
+      if (frame) {
+        frameCountRef.current++;
+        const result = await sendFrameToVision(state.session.id, frame, frameCountRef.current);
+        if (result && result.entities) {
+          const ents = {};
+          result.entities.forEach(e => { ents[e.entity_id] = e; });
+          dispatch({ type: "UPDATE_ENTITIES", payload: { entities: ents, departed: result.departed_entities } });
+        }
+      }
+    }, 200); // 5 FPS
+    return () => clearInterval(iv);
+  }, [cameraActive, state.demoMode]);
+
+  const formatTime = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  };
+
+  const getEntityColor = (e) => e.color === "blue" || e.type === "known_person" ? "#00d4ff" : e.color === "amber" || e.type === "unknown_person" ? "#f59e0b" : "#9ca3af";
+
+  return (
+    <div className="absolute inset-0 bg-black">
+      {/* Camera feed */}
+      <video
+        ref={videoRef}
+        className={`absolute inset-0 w-full h-full object-cover ${cameraActive && !state.demoMode ? "" : "hidden"}`}
+        autoPlay muted playsInline
+      />
+
+      {/* Placeholder shown when camera is off or in demo mode */}
+      {(!cameraActive || state.demoMode) && (
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-[#0f1419] to-slate-900">
+          <div className="absolute inset-0 opacity-20" style={{
+            backgroundImage: `radial-gradient(circle at 30% 40%, rgba(0,212,255,0.08) 0%, transparent 50%),
+                              radial-gradient(circle at 70% 60%, rgba(245,158,11,0.06) 0%, transparent 50%)`
+          }} />
+        </div>
+      )}
+
+      {/* Scanline overlay */}
+      <div className="absolute inset-0 pointer-events-none opacity-10" style={{
+        background: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,212,255,0.03) 2px, rgba(0,212,255,0.03) 4px)"
+      }} />
+
+      {/* Bounding Boxes */}
+      {entityList.map(e => {
+        const bb = e.boundingBox || {};
+        const color = getEntityColor(e);
+        return (
+          <div key={e.id} className="absolute rounded-lg transition-all duration-500" style={{
+            left: `${bb.x || 20}%`, top: `${bb.y || 30}%`, width: `${bb.w || 15}%`, height: `${bb.h || 30}%`,
+            border: `2px solid ${color}`, backgroundColor: `${color}15`,
+            opacity: e.state === "entering" ? 0.6 : e.state === "exiting" ? 0.3 : 0.8,
+          }}>
+            <div className="absolute -top-5 left-0 px-1.5 py-0.5 rounded-sm text-[9px] font-bold uppercase tracking-tight text-black"
+              style={{ backgroundColor: color }}>
+              {e.name || e.id}
+            </div>
+            {e.type !== "object" && (
+              <div className="absolute -bottom-1 -right-1 w-3 h-3 rounded-full animate-pulse" style={{ backgroundColor: color, boxShadow: `0 0 8px ${color}` }} />
+            )}
+          </div>
+        );
+      })}
+
+      {/* Top HUD */}
+      <div className="absolute top-0 left-0 right-0 p-4 pt-10 bg-gradient-to-b from-black/80 to-transparent">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`flex items-center gap-1.5 px-2 py-1 rounded ${state.session.recording ? "bg-red-600/20 border border-red-600/50" : "bg-slate-800/60 border border-slate-700/50"}`}>
+              {state.session.recording && <span className="size-2 rounded-full bg-red-600 animate-pulse" />}
+              <span className="text-[10px] font-bold text-white tracking-widest uppercase">
+                {state.session.recording ? "LIVE" : "STANDBY"}
+              </span>
+            </div>
+            <span className="text-white/70 text-xs font-mono">Entities: {entityCount}</span>
+            {entityCount >= state.audioEngine.crowdThreshold && (
+              <span className="text-amber-400 text-[10px] font-bold uppercase animate-pulse">CROWD</span>
+            )}
+          </div>
+          {state.demoMode && (
+            <div className="px-2 py-1 rounded bg-amber-500/20 border border-amber-500/50">
+              <span className="text-[10px] font-bold text-amber-400 tracking-widest">DEMO</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Radar minimap */}
+      <div className="absolute bottom-28 left-4 size-24 rounded-full bg-black/60 border border-[#00d4ff]/30 backdrop-blur-md overflow-hidden">
+        {/* Pulse rings */}
+        <div className="absolute inset-0 rounded-full border border-[#00d4ff]/20 animate-ping" style={{ animationDuration: "3s" }} />
+        {/* Center */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 size-1.5 bg-[#00d4ff] rounded-full shadow-[0_0_8px_#00d4ff]" />
+        {/* Entity dots */}
+        {entityList.map(e => {
+          const pos = e.position || {};
+          const angle = ((pos.angle_deg || 0) - 90) * Math.PI / 180;
+          const dist = Math.min((pos.distance_m || 2) / 6, 1);
+          const x = 50 + Math.cos(angle) * dist * 40;
+          const y = 50 + Math.sin(angle) * dist * 40;
+          const color = getEntityColor(e);
+          return (
+            <div key={e.id} className="absolute size-2 rounded-full transition-all duration-500" style={{
+              left: `${x}%`, top: `${y}%`, transform: "translate(-50%,-50%)",
+              backgroundColor: color, boxShadow: `0 0 6px ${color}`,
+            }} />
+          );
+        })}
+      </div>
+
+      {/* Center controls */}
+      <div className="absolute bottom-36 left-1/2 -translate-x-1/2 flex flex-col items-center gap-3">
+        <button onClick={toggleRecording}
+          className="size-20 rounded-full bg-white/10 backdrop-blur-xl border-4 border-white/20 flex items-center justify-center active:scale-95 transition-transform">
+          {state.session.recording ? (
+            <div className="size-8 rounded bg-red-600 shadow-[0_0_20px_rgba(220,38,38,0.6)]" />
+          ) : (
+            <div className="size-10 rounded-full bg-red-600 shadow-[0_0_20px_rgba(220,38,38,0.6)]" />
+          )}
+        </button>
+        <span className="text-[10px] font-bold text-white/80 tracking-widest uppercase font-mono">
+          {state.session.recording ? `REC ${formatTime(state.session.recordTime)}` : "TAP TO START"}
+        </span>
+      </div>
+
+      {/* Right side buttons */}
+      <div className="absolute bottom-28 right-4 flex flex-col gap-3">
+        {[
+          { icon: "volume_up", label: "Audio" },
+          { icon: "photo_library", label: "Gallery" },
+          { icon: "person", label: "Identify" },
+        ].map(b => (
+          <button key={b.icon} aria-label={b.label}
+            className="size-11 rounded-full bg-black/60 backdrop-blur-md border border-white/10 flex items-center justify-center text-white/80 hover:text-white transition-colors">
+            <Icon name={b.icon} className="text-xl" />
+          </button>
+        ))}
+      </div>
+
+      {/* Corner decorations */}
+      <div className="absolute top-10 left-4 size-6 border-t-2 border-l-2 border-white/20 rounded-tl-lg pointer-events-none" />
+      <div className="absolute top-10 right-4 size-6 border-t-2 border-r-2 border-white/20 rounded-tr-lg pointer-events-none" />
+    </div>
+  );
+}
+
+// ============================================================
+// SCREEN 2: CONTACTS
+// ============================================================
+function ContactsScreen() {
+  const { state } = useApp();
+  const [search, setSearch] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newImage, setNewImage] = useState("");
+  const { dispatch } = useApp();
+
+  const handleImagePick = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setNewImage(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const contacts = Object.values(state.contacts).filter(c =>
+    c.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const statusColors = { connected: "#00d4ff", standby: "#f59e0b", disconnected: "#64748b" };
+
+  const handleAdd = () => {
+    if (!newName.trim()) return;
+    const id = `contact_${newName.toLowerCase().replace(/\s/g, "_")}_${Date.now()}`;
+    const freq = 300 + Math.random() * 400;
+    dispatch({ type: "ADD_CONTACT", payload: { id, name: newName, status: "standby", motifFreq: freq, motifDescription: newDesc || "Auto-generated motif", image: newImage || null } });
+    setNewName(""); setNewDesc(""); setNewImage(""); setShowAdd(false);
+  };
+
+  const WaveformBars = ({ freq, status }) => {
+    const heights = Array.from({ length: 14 }, (_, i) => {
+      const h = (Math.sin(i * 0.7 + freq * 0.01) * 0.5 + 0.5) * 80 + 10;
+      return status === "disconnected" ? h * 0.3 : h;
+    });
+    return (
+      <div className="h-10 w-full flex items-end gap-[2px] px-2 py-1 bg-[#007fff]/5 rounded-lg overflow-hidden">
+        {heights.map((h, i) => (
+          <div key={i} className="flex-1 bg-[#007fff] rounded-full transition-all" style={{ height: `${h}%`, opacity: 0.2 + (h / 100) * 0.7 }} />
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="absolute inset-0 bg-[#0A0A0F] flex flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 pt-10 pb-4">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-100">Contacts</h1>
+        <button onClick={() => setShowAdd(!showAdd)}
+          className="flex items-center justify-center w-10 h-10 rounded-full bg-[#ec5b13] text-white shadow-lg shadow-[#ec5b13]/20 hover:scale-105 active:scale-95 transition-transform">
+          <Icon name={showAdd ? "close" : "add"} />
+        </button>
+      </div>
+
+      {/* Add contact form */}
+      {showAdd && (
+        <div className="px-6 mb-4 p-4 bg-slate-900/60 rounded-xl mx-6 border border-slate-700/50 space-y-3">
+          {/* Image picker */}
+          <label className="flex items-center gap-3 cursor-pointer">
+            <div className="w-14 h-14 rounded-full border-2 border-dashed border-slate-600 bg-slate-800/80 flex items-center justify-center overflow-hidden flex-shrink-0">
+              {newImage ? (
+                <img src={newImage} alt="preview" className="w-full h-full object-cover" />
+              ) : (
+                <Icon name="add_a_photo" className="text-slate-500 text-xl" />
+              )}
+            </div>
+            <span className="text-slate-400 text-xs">{newImage ? "Tap to change photo" : "Add photo (optional)"}</span>
+            <input type="file" accept="image/*" className="hidden" onChange={handleImagePick} />
+          </label>
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name"
+            className="w-full h-10 px-3 bg-slate-800/80 border-none rounded-lg text-slate-200 placeholder:text-slate-500 text-sm focus:ring-1 focus:ring-[#ec5b13]/50" />
+          <textarea value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Personality (e.g., warm, jazzy, calm)" rows={2}
+            className="w-full px-3 py-2 bg-slate-800/80 border-none rounded-lg text-slate-200 placeholder:text-slate-500 text-sm resize-none focus:ring-1 focus:ring-[#ec5b13]/50" />
+          <button onClick={handleAdd} className="w-full py-2 bg-[#ec5b13] rounded-lg text-white text-sm font-bold hover:bg-[#ec5b13]/90 transition-colors">
+            Generate Motif & Save
+          </button>
+        </div>
+      )}
+
+      {/* Search */}
+      <div className="px-6 mb-4">
+        <label className="relative flex items-center w-full">
+          <Icon name="search" className="absolute left-4 text-slate-500 text-xl" />
+          <input value={search} onChange={e => setSearch(e.target.value)}
+            className="w-full h-12 pl-12 pr-4 bg-slate-900/50 border-none rounded-xl text-slate-200 placeholder:text-slate-500 text-sm focus:ring-1 focus:ring-[#ec5b13]/50"
+            placeholder="Search contacts" />
+        </label>
+      </div>
+
+      {/* Contact list */}
+      <div className="flex-1 overflow-y-auto px-6 space-y-4 pb-24">
+        {contacts.map(c => (
+          <div key={c.id} className="group flex flex-col gap-3 p-4 bg-slate-900/40 rounded-xl border border-slate-800/50 hover:border-[#007fff]/30 transition-colors">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-full border-2 border-slate-800 bg-slate-700 flex items-center justify-center text-lg font-bold text-white overflow-hidden">
+                  {c.image ? (
+                    <img src={c.image} alt={c.name} className="w-full h-full object-cover" />
+                  ) : (
+                    c.name.charAt(0)
+                  )}
+                </div>
+                <div>
+                  <p className="text-base font-semibold text-slate-100">{c.name}</p>
+                  <p className="text-[10px] font-mono uppercase tracking-widest font-bold" style={{ color: statusColors[c.status] || "#64748b" }}>
+                    {c.status}
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => { audioEngine.init(); audioEngine.playPreview(c.motifFreq); }}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-slate-200 transition-colors">
+                <Icon name="play_arrow" className="text-sm" /> Play Motif
+              </button>
+            </div>
+            <WaveformBars freq={c.motifFreq} status={c.status} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SCREEN 3: SOUNDSCAPE VISUALIZER
+// ============================================================
+function VisualizerScreen() {
+  const { state } = useApp();
+  const canvasRef = useRef(null);
+  const animRef = useRef(null);
+  const entityList = Object.values(state.entities);
+  const entitiesRef = useRef(entityList);
+  entitiesRef.current = entityList;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = 390, H = 600;
+    canvas.width = W;
+    canvas.height = H;
+    const cx = W / 2, cy = H / 2;
+
+    let t = 0;
+    const animate = () => {
+      t += 0.02;
+      ctx.fillStyle = "#0A0A0F";
+      ctx.fillRect(0, 0, W, H);
+
+      // Concentric rings
+      for (let i = 1; i <= 5; i++) {
+        const r = i * 55;
+        const pulse = Math.sin(t * 0.5 + i * 0.3) * 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + pulse, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(236, 91, 19, ${0.12 - i * 0.015})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Center hub
+      const hubPulse = 8 + Math.sin(t * 2) * 2;
+      const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, hubPulse * 2);
+      gradient.addColorStop(0, "rgba(236, 91, 19, 0.8)");
+      gradient.addColorStop(0.5, "rgba(236, 91, 19, 0.2)");
+      gradient.addColorStop(1, "transparent");
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(cx, cy, hubPulse * 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx, cy, hubPulse, 0, Math.PI * 2);
+      ctx.fillStyle = "#ec5b13";
+      ctx.fill();
+
+      // Entity orbs
+      const ents = entitiesRef.current;
+      ents.forEach(e => {
+        const pos = e.position || {};
+        const angle = ((pos.angle_deg || 0) - 90) * Math.PI / 180;
+        const dist = Math.min((pos.distance_m || 2) / 6, 1);
+        const radius = dist * 220;
+        const ex = cx + Math.cos(angle) * radius;
+        const ey = cy + Math.sin(angle) * radius;
+
+        const isKnown = e.type === "known_person" || e.color === "blue";
+        const isObject = e.type === "object" || e.color === "gray";
+        const baseColor = isKnown ? [59, 130, 246] : isObject ? [156, 163, 175] : [245, 158, 11];
+        const orbSize = isObject ? 5 : 8;
+
+        // Breathing pulse
+        const breath = orbSize + Math.sin(t * 3 + (e.motifFreq || 440) * 0.01) * 2;
+
+        // Glow
+        const glow = ctx.createRadialGradient(ex, ey, 0, ex, ey, breath * 3);
+        glow.addColorStop(0, `rgba(${baseColor.join(",")}, 0.6)`);
+        glow.addColorStop(0.5, `rgba(${baseColor.join(",")}, 0.15)`);
+        glow.addColorStop(1, "transparent");
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(ex, ey, breath * 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Orb
+        ctx.beginPath();
+        ctx.arc(ex, ey, breath, 0, Math.PI * 2);
+        ctx.fillStyle = `rgb(${baseColor.join(",")})`;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.8)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Label
+        const name = e.name || "Unknown";
+        ctx.font = "bold 10px 'Public Sans', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillStyle = `rgba(${baseColor.join(",")}, 0.9)`;
+        const labelW = ctx.measureText(name).width + 16;
+        const ly = ey + breath + 16;
+        ctx.fillStyle = `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, 0.15)`;
+        roundRect(ctx, ex - labelW / 2, ly - 8, labelW, 16, 8);
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${baseColor.join(",")}, 0.3)`;
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+        ctx.fillStyle = `rgba(${baseColor.join(",")}, 0.9)`;
+        ctx.fillText(name, ex, ly + 3);
+      });
+
+      animRef.current = requestAnimationFrame(animate);
+    };
+
+    animate();
+    return () => cancelAnimationFrame(animRef.current);
+  }, []);
+
+  return (
+    <div className="absolute inset-0 bg-[#0A0A0F] flex flex-col">
+      {/* Header */}
+      <div className="absolute top-0 w-full z-20 flex items-center justify-between p-6 pt-10 bg-gradient-to-b from-[#0A0A0F] to-transparent">
+        <div className="size-10" />
+        <div className="text-center">
+          <h2 className="text-white text-sm font-bold tracking-widest uppercase">Live Soundscape</h2>
+          <p className="text-slate-400 text-[10px] font-medium">{entityList.length} ENTITIES ACTIVE</p>
+        </div>
+        <div className="size-10" />
+      </div>
+
+      {/* Canvas */}
+      <div className="flex-1 flex items-center justify-center pt-16 pb-28">
+        <canvas ref={canvasRef} className="w-[390px] h-[600px]" />
+      </div>
+
+      {/* Footer stats */}
+      <div className="absolute bottom-36 left-0 w-full px-6 flex justify-between items-end z-20">
+        <div className="space-y-1">
+          <p className="text-slate-500 text-[10px] uppercase font-bold tracking-widest">Environment Noise</p>
+          <div className="flex items-center gap-2">
+            <div className="flex gap-0.5 h-6 items-end">
+              {[2, 4, 3, 6, 2].map((h, i) => (
+                <div key={i} className="w-1 bg-[#ec5b13] rounded-full" style={{ height: `${h * 4}px` }} />
+              ))}
+            </div>
+            <span className="text-2xl font-bold text-white">42<span className="text-xs text-slate-400 ml-0.5 font-normal">dB</span></span>
+          </div>
+        </div>
+        <div className="bg-slate-900/80 backdrop-blur-xl border border-slate-700/50 rounded-xl p-3 flex items-center gap-3">
+          <div className="size-2 rounded-full bg-green-500" />
+          <p className="text-xs font-semibold text-slate-200">System calibrated</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ============================================================
+// SCREEN 4: SETTINGS
+// ============================================================
+function SettingsScreen() {
+  const { state, dispatch } = useApp();
+  const ae = state.audioEngine;
+  const conn = state.connections;
+
+  const Toggle = ({ label, desc, checked, onChange }) => (
+    <div className="flex items-center justify-between py-3">
+      <div className="flex flex-col">
+        <p className="text-slate-100 text-sm font-medium">{label}</p>
+        {desc && <p className="text-slate-500 text-[10px]">{desc}</p>}
+      </div>
+      <button onClick={onChange}
+        className={`relative w-11 h-6 rounded-full transition-colors duration-300 ${checked ? "bg-[#3b82f6]" : "bg-slate-800"}`}>
+        <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-lg transition-transform duration-300 ${checked ? "translate-x-6" : "translate-x-1"}`} />
+      </button>
+    </div>
+  );
+
+  const Slider = ({ label, value, unit, min = 0, max = 100, onChange }) => (
+    <div className="space-y-3">
+      <div className="flex justify-between items-center">
+        <label className="text-slate-300 text-xs font-medium uppercase tracking-wider">{label}</label>
+        <p className="font-mono text-[#f59e0b] text-xs">{typeof unit === "function" ? unit(value) : `${value}${unit || "%"}`}</p>
+      </div>
+      <input type="range" min={min} max={max} value={value} onChange={e => onChange(Number(e.target.value))}
+        className="w-full accent-[#3b82f6]" style={{
+          WebkitAppearance: "none", background: "transparent", cursor: "pointer",
+        }} />
+    </div>
+  );
+
+  const ConnStatus = ({ name, status, latency }) => (
+    <div className="flex items-center justify-between py-2">
+      <div className="flex items-center gap-3">
+        <div className={`size-2 rounded-full ${status === "connected" ? "bg-green-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]" : "bg-red-500"}`} />
+        <span className="text-slate-200 text-sm">{name}</span>
+      </div>
+      <span className="font-mono text-slate-500 text-xs">{status === "connected" && latency ? `${latency}ms` : status}</span>
+    </div>
+  );
+
+  return (
+    <div className="absolute inset-0 bg-[#0A0A0F] flex flex-col">
+      {/* Header */}
+      <div className="flex items-center px-6 pt-10 pb-4 border-b border-slate-800/50">
+        <h2 className="text-white text-lg font-bold uppercase tracking-widest flex-1 text-center">Settings</h2>
+      </div>
+
+      <div className="flex-1 overflow-y-auto pb-24">
+        {/* Audio */}
+        <section className="mt-6">
+          <h3 className="text-[#3b82f6] text-[10px] font-bold uppercase tracking-[0.2em] px-6 mb-4 opacity-80">Audio Basics</h3>
+          <div className="px-6 space-y-6">
+            <Slider label="Master Volume" value={Math.round(ae.masterVolume * 100)} unit="%"
+              onChange={v => { dispatch({ type: "SET_AUDIO", payload: { masterVolume: v / 100 } }); audioEngine.setMasterVolume(v / 100); }} />
+            <Slider label="Crowd Threshold" value={ae.crowdThreshold} unit={v => `${v} faces`} min={3} max={10}
+              onChange={v => dispatch({ type: "SET_AUDIO", payload: { crowdThreshold: v } })} />
+          </div>
+        </section>
+
+        {/* Performance */}
+        <section className="mt-8">
+          <h3 className="text-[#3b82f6] text-[10px] font-bold uppercase tracking-[0.2em] px-6 mb-2 opacity-80">Performance</h3>
+          <div className="px-6">
+            <Toggle label="Spatialization" desc="3D Binaural processing"
+              checked={ae.spatializationEnabled} onChange={() => dispatch({ type: "SET_AUDIO", payload: { spatializationEnabled: !ae.spatializationEnabled } })} />
+            <Toggle label="Demo Mode" desc="Simulate entities for testing"
+              checked={state.demoMode} onChange={() => dispatch({ type: "TOGGLE_DEMO" })} />
+          </div>
+        </section>
+
+        {/* Connections */}
+        <section className="mt-8">
+          <h3 className="text-[#f59e0b] text-[10px] font-bold uppercase tracking-[0.2em] px-6 mb-4 opacity-80">Connections</h3>
+          <div className="px-6 space-y-1">
+            <ConnStatus name="Vision Service (Aaron)" status={conn.vision.status} latency={conn.vision.latency} />
+            <ConnStatus name="Audio Service (Sriya)" status={conn.audio.status} latency={conn.audio.latency} />
+            <ConnStatus name="WebSocket" status={conn.ws.status} />
+          </div>
+        </section>
+
+        {/* API Config */}
+        <section className="mt-8 mb-8">
+          <h3 className="text-slate-500 text-[10px] font-bold uppercase tracking-[0.2em] px-6 mb-4 opacity-80">API Endpoints</h3>
+          <div className="px-6 space-y-2">
+            {Object.entries(API_CONFIG).map(([key, val]) => (
+              <div key={key} className="flex justify-between items-center py-1.5">
+                <span className="text-slate-400 text-[10px] font-mono uppercase">{key}</span>
+                <span className="text-slate-500 text-[10px] font-mono">{val}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// MAIN APP
+// ============================================================
+export default function LeitmotifApp() {
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const prevEntitiesRef = useRef({});
+
+  // Demo mode tick
+  useEffect(() => {
+    if (!state.demoMode || !state.session.recording) return;
+    let t = 0;
+    const iv = setInterval(() => {
+      t = (t + 0.5) % 30;
+      dispatch({ type: "SET_DEMO_TIME", payload: t });
+      const { entities, departed } = getDemoState(t);
+      dispatch({ type: "UPDATE_ENTITIES", payload: { entities, departed } });
+    }, 500);
+    return () => clearInterval(iv);
+  }, [state.demoMode, state.session.recording]);
+
+  // Audio sync — play/update/depart entities
+  useEffect(() => {
+    if (!audioEngine.initialized) return;
+    const prev = prevEntitiesRef.current;
+    const curr = state.entities;
+
+    // New or updated entities
+    Object.values(curr).forEach(e => {
+      const pos = e.position || {};
+      audioEngine.playEntity(e.id, e.motifFreq || 440, pos.angle_deg || 0, pos.distance_m || 2);
+    });
+
+    // Departed
+    state.departedEntities.forEach(id => {
+      audioEngine.departEntity(id);
+    });
+
+    // Entities that disappeared without being in departed list
+    Object.keys(prev).forEach(id => {
+      if (!curr[id] && !state.departedEntities.includes(id)) {
+        audioEngine.departEntity(id);
+      }
+    });
+
+    prevEntitiesRef.current = curr;
+  }, [state.entities, state.departedEntities]);
+
+  const navigate = (screen) => dispatch({ type: "SET_SCREEN", payload: screen });
+
+  const screens = {
+    monitor: MonitorScreen,
+    contacts: ContactsScreen,
+    visualizer: VisualizerScreen,
+    settings: SettingsScreen,
+  };
+  const Screen = screens[state.currentScreen];
+
+  return (
+    <AppContext.Provider value={{ state, dispatch }}>
+      <div className="flex items-center justify-center min-h-screen bg-[#050508]">
+        {/* Phone frame */}
+        <div className="relative w-[390px] h-[844px] bg-[#0A0A0F] overflow-hidden shadow-2xl shadow-black/80 border border-slate-800/30 rounded-[2.5rem]">
+          {/* Notch */}
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-36 h-7 bg-black rounded-b-2xl z-[60]" />
+
+          <Screen />
+          <BottomNav current={state.currentScreen} onNavigate={navigate} />
+        </div>
+      </div>
+    </AppContext.Provider>
+  );
+}
