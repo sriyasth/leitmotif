@@ -11,7 +11,8 @@
   },
   "references": [
     { "path": "packages/shared-types" },
-    { "path": "services/perception" }
+    { "path": "services/perception" },
+    { "path": "services/vibe" }
   ],
   "files": []
 }
