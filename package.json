@@ -22,10 +22,14 @@
     "@google/genai": "^1.44.0",
     "@supabase/supabase-js": "^2.98.0",
     "dotenv": "^17.3.1",
-    "speaker": "^0.5.5"
+    "speaker": "^0.5.5",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
