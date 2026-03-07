@@ -1,0 +1,36 @@
+=== Enrollment Summary ===
+embedder_model=VisionFeaturePrint version=ios
+identity=profile1 selected_top_samples=6 avg_quality=0.624
+identity=profile2 selected_top_samples=6 avg_quality=0.651
+identity=profile3 selected_top_samples=6 avg_quality=0.583
+
+=== Recognition Timeline (PersonEvents) ===
+ts=1970-01-01T00:00:00.100Z event=person_entered track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.824 bearing=-0.167 distance=0.998 top1=0.824 top2=0.815 margin=0.009
+ts=1970-01-01T00:00:00.233Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.838 bearing=-0.167 distance=1.026 top1=0.838 top2=0.825 margin=0.013
+ts=1970-01-01T00:00:00.500Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.857 bearing=-0.161 distance=1.059 top1=0.857 top2=0.845 margin=0.012
+ts=1970-01-01T00:00:00.900Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.868 bearing=-0.172 distance=0.918 top1=0.868 top2=0.815 margin=0.052
+ts=1970-01-01T00:00:01.700Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.898 bearing=-0.184 distance=0.725 top1=0.898 top2=0.848 margin=0.050
+ts=1970-01-01T00:00:02.100Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.918 bearing=-0.153 distance=0.601 top1=0.918 top2=0.882 margin=0.035
+ts=1970-01-01T00:00:02.366Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.910 bearing=-0.116 distance=0.532 top1=0.910 top2=0.859 margin=0.051
+ts=1970-01-01T00:00:02.766Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.895 bearing=-0.119 distance=0.464 top1=0.895 top2=0.857 margin=0.038
+ts=1970-01-01T00:00:03.166Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.930 bearing=-0.158 distance=0.445 top1=0.930 top2=0.879 margin=0.051
+ts=1970-01-01T00:00:03.300Z event=person_updated track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.884 bearing=-0.175 distance=0.442 top1=0.884 top2=0.860 margin=0.024
+ts=1970-01-01T00:00:04.233Z event=person_entered track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.810 bearing=-0.134 distance=0.499 top1=0.810 top2=0.800 margin=0.011
+ts=1970-01-01T00:00:04.233Z event=person_left track=61E4A314-E5B2-4634-BCCB-36314CD89F15 user_type=unknown user_id=C07C79D7-BE34-4FD9-96E6-4C2B279C3A70 source=track conf=0.695 bearing=-0.156 distance=0.576 top1=0.000 top2=0.000 margin=0.000
+ts=1970-01-01T00:00:04.500Z event=person_updated track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.897 bearing=-0.139 distance=0.521 top1=0.897 top2=0.862 margin=0.034
+ts=1970-01-01T00:00:04.900Z event=person_updated track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.917 bearing=-0.154 distance=0.510 top1=0.917 top2=0.878 margin=0.039
+ts=1970-01-01T00:00:05.300Z event=person_updated track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.905 bearing=-0.150 distance=0.518 top1=0.905 top2=0.868 margin=0.038
+ts=1970-01-01T00:00:05.700Z event=person_updated track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.924 bearing=-0.144 distance=0.516 top1=0.924 top2=0.902 margin=0.022
+ts=1970-01-01T00:00:06.100Z event=person_updated track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.918 bearing=-0.148 distance=0.510 top1=0.918 top2=0.881 margin=0.037
+ts=1970-01-01T00:00:06.500Z event=person_updated track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.849 bearing=-0.167 distance=0.503 top1=0.849 top2=0.843 margin=0.006
+ts=1970-01-01T00:00:07.433Z event=person_left track=0AB93679-BA21-46C3-A6EB-EB6F84CC7670 user_type=unknown user_id=F32BCB6C-2B6D-4F4A-9513-09A3ACF725A8 source=track conf=0.594 bearing=-0.159 distance=0.509 top1=0.000 top2=0.000 margin=0.000
+ts=1970-01-01T00:00:08.066Z event=person_left track=965DF48C-ABCF-4216-AAF7-1229DF76B298 user_type=unknown user_id=0239C2A3-FAEC-4F37-B9E2-76B81BCA64A3 source=track conf=0.000 bearing=0.104 distance=0.518 top1=0.000 top2=0.000 margin=0.000
+ts=1970-01-01T00:00:11.666Z event=person_left track=C05260D7-42CA-4D09-B16B-E3B0A2588D7A user_type=unknown user_id=4A131A68-6FE2-44F8-A3AD-62B36B2AA20D source=track conf=0.000 bearing=0.515 distance=2.436 top1=0.000 top2=0.000 margin=0.000
+
+=== Identification Latency (first_seen -> person_entered enrolled) ===
+
+=== Identity Change Moments ===
+none
+
+=== Embedding Inference Latency ===
+samples=18 avg=3.46ms p95=3.83ms max=4.16ms
