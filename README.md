@@ -4,6 +4,8 @@
 
 Leitmotif is an assistive audio system that generates adaptive, real-time background music to help visually impaired users perceive their surroundings. Each detected person is represented by a unique musical *motif* — a short melodic signature — woven into an evolving soundtrack that reflects the scene's mood.
 
+The project includes **Sensible**, a real-time on-device face recognition pipeline for iOS built with React Native. Sensible provides a native iOS module that runs entirely on-device using Apple Vision and CoreML — detecting, tracking, and identifying faces from the camera feed and emitting structured events to the React Native layer.
+
 ---
 
 ## Architecture Overview
@@ -53,6 +55,7 @@ Webcam Frame
 | Database | Supabase (PostgreSQL) via `@supabase/supabase-js` |
 | Audio playback | `speaker` (PCM stream to system audio) |
 | Mobile app | React Native (iOS / Android) |
+| Face recognition | Apple Vision · CoreML · AdaFace (on-device, iOS) |
 | Web mockup | React · Vite · Tailwind CSS |
 
 ---
@@ -294,6 +297,14 @@ Exports two Supabase clients:
 
 These values stay constant so each person's motif remains recognizable regardless of instrument, octave, or background style.
 
+### Person Events Schema
+
+The Supabase migration (`scripts/migration_person_events.sql`) creates the following tables for the face recognition pipeline:
+
+- **`person_events`** — Log of all enter/update/leave events
+- **`persons`** — Known person records with last-seen timestamps
+- **`visible_users`** — Currently visible users (live state)
+
 ---
 
 ## TypeScript Interfaces
@@ -352,10 +363,32 @@ leitmotif/
 │   ├── server.ts           #    HTTP server + Gemini vision
 │   └── camera.html         #    Browser webcam capture UI
 ├── apps/mobile/            # 📱 React Native mobile app
+│   ├── ios/
+│   │   └── FacePipeline/   #    Native iOS face recognition module
+│   │       ├── FacePipelineModule.swift  # RCTEventEmitter bridge
+│   │       ├── CaptureManager.swift     # AVFoundation camera capture
+│   │       ├── FrameScheduler.swift     # Frame rate throttling
+│   │       ├── VisionPipeline.swift     # Apple Vision face detection
+│   │       ├── TrackManager.swift       # Multi-face tracking state
+│   │       ├── QualityGate.swift        # Face quality filtering
+│   │       ├── FaceEmbedder.swift       # CoreML embedding (AdaFace)
+│   │       ├── FaceMatcher.swift        # Cosine similarity matching
+│   │       ├── GalleryStore.swift       # On-device gallery persistence
+│   │       ├── EnrollmentManager.swift  # Contact enrollment flow
+│   │       ├── SceneDescriber.swift     # Gemini scene narration
+│   │       ├── SupabaseSync.swift       # Cloud sync for identities
+│   │       └── Types.swift              # Shared type definitions
 │   └── src/
+│       ├── FacePipeline.ts #    JS API & event subscriptions
 │       ├── screens/        #    Monitor, Contacts, Visualizer, Settings
 │       ├── AppContext.tsx   #    Global state
 │       └── ...
+├── models/                 # 🧠 CoreML models
+│   └── AdaFace_IR50.mlpackage  # Face recognition model
+├── scripts/                # 🔧 Utilities & migrations
+│   ├── convert_adaface.py            # Convert AdaFace model to CoreML
+│   ├── migration_person_events.sql   # Person events DB migration
+│   └── validate_video_pipeline.swift # Validate pipeline against test videos
 ├── lib/
 │   └── supabase.ts         # Supabase client setup
 ├── src/                    # Web mockup (React + Vite)
@@ -381,7 +414,82 @@ The mobile app syncs with the Music Engine backend via `useMusicEngineSync.ts`.
 
 ---
 
+## iOS Face Recognition Pipeline (Sensible)
+
+Sensible is the native iOS face recognition module that powers on-device person detection for the mobile app. It runs entirely on-device using Apple Vision and CoreML, eliminating the need for server round-trips.
+
+### Key Features
+
+- **Real-time face detection & tracking** — Uses Apple Vision framework for face detection with persistent track IDs across frames
+- **On-device face embeddings** — Generates 512-d face embeddings via an AdaFace CoreML model (no server round-trips)
+- **Face matching & enrollment** — Enroll known contacts with a short capture burst; match faces against the local gallery in real time
+- **Scene descriptions** — Optional Gemini-powered scene narration with context about visible people
+- **Supabase sync** — Syncs enrolled identities and embeddings to a Supabase backend
+- **Structured person events** — Emits `person_entered`, `person_updated`, and `person_left` events with confidence, bearing, and distance data
+
+### Pipeline Architecture
+
+```
+React Native (TypeScript)
+  └─ FacePipeline.ts          # JS API & event subscriptions
+       └─ FacePipelineModule   # Native Swift module (RCTEventEmitter)
+            ├─ CaptureManager      # AVFoundation camera capture
+            ├─ FrameScheduler      # Frame rate throttling
+            ├─ VisionPipeline      # Apple Vision face detection
+            ├─ TrackManager        # Multi-face tracking state
+            ├─ QualityGate         # Face quality filtering
+            ├─ FaceEmbedder        # CoreML embedding (AdaFace)
+            ├─ FaceMatcher         # Cosine similarity matching
+            ├─ GalleryStore        # On-device gallery persistence
+            ├─ EnrollmentManager   # Contact enrollment flow
+            ├─ SceneDescriber      # Gemini scene narration
+            └─ SupabaseSync        # Cloud sync for identities
+```
+
+### FacePipeline Usage
+
+```typescript
+import { FacePipeline } from './FacePipeline';
+
+// Start the pipeline
+await FacePipeline.startPipeline({
+  detectEveryNFrames: 4,
+  supabaseUrl: 'https://your-project.supabase.co',
+  supabaseAnonKey: 'your-anon-key',
+});
+
+// Listen for person events
+FacePipeline.onPersonEvent((event) => {
+  console.log(event.event_type, event.display_name, event.confidence);
+});
+
+// Enroll a new contact
+const result = await FacePipeline.enrollContact({
+  owner_user_id: 'user-123',
+  contact_external_id: 'contact-456',
+  display_name: 'Jane Doe',
+  burst_seconds: 3,
+});
+
+// Stop the pipeline
+await FacePipeline.stopPipeline();
+```
+
+### Face Recognition Models
+
+- **AdaFace_IR50** — CoreML-converted face recognition model located in `models/AdaFace_IR50.mlpackage`
+
+To convert the AdaFace model from a PyTorch checkpoint to CoreML format, run:
+
+```bash
+python scripts/convert_adaface.py
+```
+
+---
+
 ## How It All Fits Together
+
+### Desktop Pipeline
 
 1. **Camera captures a frame** → sent as base64 JPEG to the Camera Server
 2. **Gemini vision** analyzes the image → extracts vibe, people, and scene description
@@ -391,6 +499,32 @@ The mobile app syncs with the Music Engine backend via `useMusicEngineSync.ts`.
 6. **Lyria RealTime** generates adaptive music from the refined prompt
 7. **Audio streams** to the system speaker and is saved to `music-output.wav`
 8. **On next frame**, the cycle repeats — music evolves continuously without interruption
+
+### iOS Pipeline (Sensible)
+
+1. **Camera feed** is captured on-device via AVFoundation
+2. **Apple Vision** detects and tracks faces across frames
+3. **AdaFace CoreML model** generates 512-d face embeddings on-device
+4. **FaceMatcher** compares embeddings against the local gallery using cosine similarity
+5. **Person events** (`person_entered`, `person_updated`, `person_left`) are emitted to the React Native layer
+6. **Supabase sync** keeps enrolled identities and embeddings in sync with the cloud
+7. **Music Engine** receives person events and generates adaptive motifs for each recognized person
+
+---
+
+## Requirements
+
+### Backend (Desktop)
+
+- **Node.js 18.x**
+- A **Google Gemini API key** with access to Gemini 2.5-flash and Lyria RealTime
+- A **Supabase** project with the `person_motif_prompts` table (see [Database Schema](#database-schema))
+
+### iOS Face Recognition (Sensible)
+
+- iOS 16+
+- React Native
+- Xcode with CoreML support
 
 ---
 
