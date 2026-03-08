@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Leitmotif — Camera</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #e2e8f0; font-family: system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+    header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid #1e293b; }
+    header h1 { font-size: 16px; letter-spacing: 2px; color: #ec5b13; }
+    #status { font-size: 12px; color: #64748b; }
+    .main { display: flex; flex: 1; overflow: hidden; }
+
+    /* Left — camera */
+    .cam-panel { flex: 0 0 640px; display: flex; flex-direction: column; align-items: center; padding: 16px; }
+    video { width: 100%; max-width: 640px; border-radius: 8px; background: #111; }
+    canvas { display: none; }
+
+    /* Right — engine output */
+    .engine-panel { flex: 1; display: flex; flex-direction: column; border-left: 1px solid #1e293b; min-width: 320px; }
+
+    /* Current state cards */
+    .state-bar { display: flex; gap: 1px; background: #1e293b; }
+    .state-card { flex: 1; padding: 12px 16px; background: #0f1118; }
+    .state-card .label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: #64748b; margin-bottom: 4px; }
+    .state-card .value { font-size: 18px; font-weight: 600; }
+    .state-card .value.vibe { color: #ec5b13; }
+    .state-card .value.people { color: #38bdf8; }
+    .state-card .value.motifs { color: #a78bfa; }
+
+    /* People list */
+    .people-section { padding: 12px 16px; border-bottom: 1px solid #1e293b; }
+    .people-section h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: #64748b; margin-bottom: 8px; }
+    .person-tag { display: inline-block; padding: 4px 10px; margin: 2px 4px 2px 0; border-radius: 12px; font-size: 12px; font-weight: 500; }
+    .person-tag.entered { background: #064e3b; color: #6ee7b7; }
+    .person-tag.present { background: #1e293b; color: #94a3b8; }
+    .person-tag.left { background: #450a0a; color: #fca5a5; text-decoration: line-through; }
+    .no-people { font-size: 12px; color: #475569; font-style: italic; }
+
+    /* Event log */
+    .event-log { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .event { padding: 6px 16px; font-size: 12px; border-bottom: 1px solid #0f1118; display: flex; gap: 8px; }
+    .event:hover { background: #111827; }
+    .event .ts { color: #475569; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+    .event .icon { flex-shrink: 0; width: 16px; text-align: center; }
+    .event .msg { color: #cbd5e1; }
+    .event.vibe-change .icon { color: #ec5b13; }
+    .event.person-enter .icon { color: #6ee7b7; }
+    .event.person-leave .icon { color: #fca5a5; }
+    .event.motif-change .icon { color: #a78bfa; }
+    .event.scene .icon { color: #64748b; }
+    .event.error .icon { color: #f87171; }
+    .event.error .msg { color: #f87171; }
+
+    /* Scene description */
+    .scene-desc { padding: 8px 16px; font-size: 12px; color: #64748b; border-bottom: 1px solid #1e293b; min-height: 32px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LEITMOTIF</h1>
+    <span id="status">Requesting camera...</span>
+  </header>
+
+  <div class="main">
+    <div class="cam-panel">
+      <video id="cam" autoplay playsinline muted></video>
+      <canvas id="snap"></canvas>
+    </div>
+
+    <div class="engine-panel">
+      <!-- Live state cards -->
+      <div class="state-bar">
+        <div class="state-card">
+          <div class="label">Vibe</div>
+          <div class="value vibe" id="cur-vibe">--</div>
+        </div>
+        <div class="state-card">
+          <div class="label">People</div>
+          <div class="value people" id="cur-people">0</div>
+        </div>
+        <div class="state-card">
+          <div class="label">Active Motifs</div>
+          <div class="value motifs" id="cur-motifs">0</div>
+        </div>
+      </div>
+
+      <!-- Scene description -->
+      <div class="scene-desc" id="scene-desc">Waiting for first frame...</div>
+
+      <!-- People tags -->
+      <div class="people-section">
+        <h3>People in Scene</h3>
+        <div id="people-list"><span class="no-people">None detected</span></div>
+      </div>
+
+      <!-- Event feed -->
+      <div class="event-log" id="event-log"></div>
+    </div>
+  </div>
+
+  <script>
+    const FRAME_INTERVAL_MS = 4000;
+    const SERVER = 'http://localhost:3002';
+
+    const video = document.getElementById('cam');
+    const canvas = document.getElementById('snap');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const eventLog = document.getElementById('event-log');
+    const curVibe = document.getElementById('cur-vibe');
+    const curPeople = document.getElementById('cur-people');
+    const curMotifs = document.getElementById('cur-motifs');
+    const sceneDesc = document.getElementById('scene-desc');
+    const peopleList = document.getElementById('people-list');
+
+    // State tracking for diff detection
+    let prevVibe = null;
+    let prevUsers = [];
+
+    function ts() {
+      return new Date().toLocaleTimeString('en-US', { hour12: false });
+    }
+
+    function addEvent(type, icon, msg) {
+      const el = document.createElement('div');
+      el.className = 'event ' + type;
+      el.innerHTML = `<span class="ts">${ts()}</span><span class="icon">${icon}</span><span class="msg">${msg}</span>`;
+      eventLog.prepend(el);
+      // Keep max 100 events
+      while (eventLog.children.length > 100) eventLog.lastChild.remove();
+    }
+
+    function updatePeopleList(users, entered, left) {
+      if (users.length === 0 && left.length === 0) {
+        peopleList.innerHTML = '<span class="no-people">None detected</span>';
+        return;
+      }
+      let html = '';
+      for (const u of users) {
+        const cls = entered.includes(u) ? 'entered' : 'present';
+        html += `<span class="person-tag ${cls}">${u}</span>`;
+      }
+      for (const u of left) {
+        html += `<span class="person-tag left">${u}</span>`;
+      }
+      peopleList.innerHTML = html;
+    }
+
+    function handleResult(data) {
+      const vibe = data.vibe || 'unknown';
+      const users = data.visible_users || [];
+      const desc = data.scene_description || '';
+
+      // Detect changes
+      const entered = users.filter(u => !prevUsers.includes(u));
+      const left = prevUsers.filter(u => !users.includes(u));
+      const vibeChanged = prevVibe !== null && prevVibe !== vibe;
+
+      // Update state cards
+      curVibe.textContent = vibe;
+      curPeople.textContent = users.length;
+      curMotifs.textContent = users.length; // motifs = 1 per person
+      sceneDesc.textContent = desc || 'No description';
+
+      // Update people tags
+      updatePeopleList(users, entered, left);
+
+      // Log events
+      if (vibeChanged) {
+        addEvent('vibe-change', '\u25C9', `Vibe changed: ${prevVibe} \u2192 ${vibe}`);
+      }
+      for (const u of entered) {
+        addEvent('person-enter', '\u25B2', `${u} entered the scene`);
+        addEvent('motif-change', '\u266B', `Motif activated for ${u}`);
+      }
+      for (const u of left) {
+        addEvent('person-leave', '\u25BC', `${u} left the scene`);
+        addEvent('motif-change', '\u266B', `Motif deactivated for ${u}`);
+      }
+      if (!vibeChanged && entered.length === 0 && left.length === 0) {
+        addEvent('scene', '\u00B7', `Scene steady \u2014 ${vibe}, ${users.length} people`);
+      }
+
+      // Save state for next diff
+      prevVibe = vibe;
+      prevUsers = [...users];
+    }
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: 'user' }
+        });
+        video.srcObject = stream;
+        statusEl.textContent = 'Camera active \u2014 analyzing every ' + (FRAME_INTERVAL_MS / 1000) + 's';
+        addEvent('scene', '\u25CF', 'Camera started');
+        setInterval(captureAndSend, FRAME_INTERVAL_MS);
+      } catch (err) {
+        statusEl.textContent = 'Camera error: ' + err.message;
+        addEvent('error', '\u2716', 'Camera error: ' + err.message);
+      }
+    }
+
+    async function captureAndSend() {
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+      const base64 = dataUrl.split(',')[1];
+
+      try {
+        const res = await fetch(SERVER + '/frame', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: base64 }),
+        });
+        const data = await res.json();
+        handleResult(data);
+      } catch (err) {
+        addEvent('error', '\u2716', 'Send error: ' + err.message);
+      }
+    }
+
+    start();
+  </script>
+</body>
+</html>
