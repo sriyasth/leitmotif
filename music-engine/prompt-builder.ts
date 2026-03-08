@@ -2,7 +2,9 @@ import type { MusicState, PersonMotif } from './types'
 
 interface PromptBuilderInput {
   vibe: string
+  environment: string
   motifs: PersonMotif[]
+  leavingMotifs: PersonMotif[]
   previousState: MusicState | null
   entering: string[]
   leaving: string[]
@@ -43,39 +45,56 @@ function buildFrozenMotifDescription(motif: PersonMotif): string {
   const rhythmPattern = inferRhythmPattern(sig.note_count)
 
   return [
-    `A solo ${instrument} playing a ${sig.note_count}-note melody.`,
+    `Begin with a single sharp snare hit to mark the motif start.`,
+    `Immediately after the snare hit, a solo ${instrument} plays a ${sig.note_count}-note melody.`,
+    `Total motif duration: exactly 3 seconds (snare hit + melody).`,
     `Rhythm: ${rhythmPattern}.`,
     `Melodic contour: ${sig.melodic_contour}.`,
     `Interval pattern: ${sig.interval_pattern.join(', ')}.`,
     `Character reference for timbre only: ${sig.character}.`,
-    `No accompaniment, no reverb, no background, no harmony, no percussion.`,
+    `No accompaniment, no reverb, no background, no harmony beyond the opening snare.`,
     `Clean, dry, close-miked recording.`,
     `Single monophonic line only.`,
     `Do not add extra notes, ornamentation, counter-melody, chords, or texture.`
   ].join(' ')
 }
 
+const ENV_TEXTURE: Record<string, string> = {
+  outdoors_nature: 'Use organic textures: gentle wind pads, soft wooden percussion, birdsong-like tones. Key center should feel open and pastoral (G major, D major).',
+  outdoors_urban: 'Use urban-ambient textures: distant muted synth hum, light metallic resonance, subtle rhythmic pulse. Slightly faster feel.',
+  outdoors_park: 'Use warm outdoor textures: acoustic guitar harmonics, soft marimba, airy pads. Relaxed and spacious.',
+  indoors_home: 'Use intimate warm textures: soft piano, gentle Rhodes, warm pad. Close and cozy feel.',
+  indoors_office: 'Use neutral focused textures: minimal clean synth pad, very soft hi-hat, muted keys. Unobtrusive and steady.',
+  indoors_public: 'Use open indoor textures: light reverb pad, soft ambient chime, gentle pulse. Spacious but contained.',
+  transit: 'Use motion textures: slow rhythmic pulse, gentle low drone, soft evolving pad. Sense of movement.',
+  unknown: 'Use neutral ambient textures: soft pad, gentle piano.',
+}
+
 export function buildLyriaPrompt(input: PromptBuilderInput): string {
-  const { vibe, motifs, previousState, entering, leaving } = input
+  const { vibe, environment, motifs, leavingMotifs, previousState, entering, leaving } = input
   const lines: string[] = []
 
   const vibeChanged = previousState !== null && previousState.vibe !== vibe
   const hasMotifChange = entering.length > 0 || leaving.length > 0
+  const envTexture = ENV_TEXTURE[environment] ?? ENV_TEXTURE.unknown
 
   // Base musical context
   if (!previousState) {
     lines.push(
       `Generate a continuous ambient musical background.`,
       `Scene vibe: ${vibe}.`,
+      `Environment: ${environment}.`,
+      `${envTexture}`,
       `Texture: sparse, minimal, slowly evolving.`,
       `Tempo: 70-90 bpm.`,
-      `Background instruments: soft pads, soft piano, or very light percussion only.`,
       `Do not make the background busy, dense, muddy, or melody-forward.`,
       `Foreground motifs must always stand out clearly from the background.`
     )
   } else if (vibeChanged) {
     lines.push(
       `The scene mood is shifting from "${previousState.vibe}" to "${vibe}".`,
+      `Environment: ${environment}.`,
+      `${envTexture}`,
       `Begin from the current musical texture: ${previousState.tempo} bpm, key of ${previousState.key}.`,
       previousState.instrumentation.length
         ? `Current instrumentation: ${previousState.instrumentation.join(', ')}.`
@@ -113,9 +132,9 @@ export function buildLyriaPrompt(input: PromptBuilderInput): string {
     lines.push(
       `\nForeground motif rules (these represent people and must be unmistakable):`,
       `• Before a motif plays, briefly duck the background instruments.`,
-      `• Each motif must be short, fixed, and easy to recognize.`,
+      `• Each motif must be exactly 3 seconds long: a snare hit followed by the melody.`,
       `• Play each motif exactly once when triggered and do not repeat it afterward.`,
-      `• Leave at least 2 seconds of space between motifs.`,
+      `• Leave at least 1 second of space between motifs.`,
       `• Each motif must be rendered as a standalone single-instrument phrase.`,
       `• No accompaniment, no harmony, no percussion, no pad, and no layered texture during a motif.`,
       `• Motifs must be significantly louder and clearer than the background.`,
@@ -147,19 +166,23 @@ export function buildLyriaPrompt(input: PromptBuilderInput): string {
     })
   }
 
-  // Leaving cues
-  for (const userId of leaving) {
-    const motif = motifs.find(m => m.user_id === userId)
-    const name = motif?.name ?? userId
+  // Leaving cues — play the inverted version of their motif
+  for (const motif of leavingMotifs) {
+    const sig = motif.motif_signature
+    const instrument = inferInstrument(sig.character || '')
+    const invertedIntervals = sig.interval_pattern.map(n => -n)
 
     lines.push(
-      `\n${name} is LEAVING the scene.`,
-      `Create a clear exit cue.`,
-      `Briefly lower the background instruments.`,
-      `If this person's motif definition is available above, play that same motif once in the same instrument and same rhythmic shape, then end with a short descending release gesture.`,
-      `The exit version should still be recognizable as the same identity cue, not a different melody.`,
-      `Do not add harmony or background layers while it plays.`,
-      `After the cue resolves, fade that motif out of the soundscape and restore the background.`
+      `\n${motif.name} is LEAVING the scene.`,
+      `Create a clear exit cue using the INVERTED version of their motif.`,
+      `Briefly duck all background instruments to silence.`,
+      `Play a solo ${instrument} with ${sig.note_count} notes.`,
+      `Inverted interval pattern: ${invertedIntervals.join(', ')}.`,
+      `The contour should be the mirror of their entry motif — if it rose, now it falls.`,
+      `End with a descending release gesture that fades out.`,
+      `The exit motif must be clearly recognizable as the inverse of their entry cue.`,
+      `No accompaniment, no harmony, no background layers while it plays.`,
+      `After the exit motif resolves, restore the background smoothly.`
     )
   }
 
@@ -168,8 +191,8 @@ export function buildLyriaPrompt(input: PromptBuilderInput): string {
     `\nAccessibility Rules:`,
     `Motifs represent people and must always be easy to recognize.`,
     `Foreground motifs must always be clearly audible over the background.`,
+    'MAKE MOTIFS MUCH LOUDER THAN THE BACKGROUND. EVEN IF THE BACKGROUND IS LOUD, THE MOTIFS MUST BE LOUDER AND CLEARER.',
     `Never play two motifs simultaneously.`,
-    `Motifs must remain musically consistent when repeated.`,
     `The soundscape should feel calm and readable, never chaotic.`
   )
 

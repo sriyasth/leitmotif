@@ -29,6 +29,7 @@ export interface LyriaPrompt {
 
 export interface SceneInput {
   vibe: string
+  environment: string
   visible_users: string[]
 }
 

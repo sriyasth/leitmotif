@@ -20,28 +20,75 @@ function getAI() {
   return _ai
 }
 
-const VISION_PROMPT = `You are analyzing a webcam frame for an assistive audio system that helps visually impaired users.
-
-Analyze this image and return ONLY valid JSON:
-{
-  "vibe": "<one of: calm, busy, tense, cheerful, empty, intimate>",
-  "people": [
-    { "id": "<stable short label like person_1>", "description": "<brief>" }
-  ],
-  "scene_description": "<one sentence describing the scene>"
+// -- Person tracking state --
+interface TrackedPerson {
+  id: string
+  description: string
+  missedFrames: number // how many consecutive frames they've been absent
 }
 
+const trackedPeople = new Map<string, TrackedPerson>()
+const LEAVE_THRESHOLD = 2 // must be absent for this many frames before considered "left"
+let nextPersonId = 1
+
+// -- Cached scene state (updated every 20s) --
+let cachedVibe = 'calm'
+let cachedEnvironment = 'unknown'
+let cachedSceneDescription = ''
+
+// -- Fast people-tracking prompt (1s) --
+function buildPeoplePrompt(): string {
+  const currentPeople = [...trackedPeople.values()].filter(p => p.missedFrames === 0)
+  const peopleContext = currentPeople.length > 0
+    ? `\nPeople currently tracked:\n${currentPeople.map(p => `- ${p.id}: ${p.description}`).join('\n')}\nReuse these exact IDs if same person is still visible.`
+    : ''
+
+  return `Count and identify people in this webcam frame. Be fast and precise.
+${peopleContext}
+Return ONLY valid JSON:
+{
+  "people_count": <integer>,
+  "people": [
+    { "id": "<reuse existing ID or person_N for new>", "description": "<brief: hair, clothing, position>" }
+  ]
+}
 Rules:
-- If no people are visible, return an empty people array.
-- Use consistent IDs for the same person across frames (based on position/appearance).
-- The vibe should reflect the overall mood/energy of the scene.
+- If 0 people visible, return people_count: 0 and empty array.
+- Only include people actually visible in THIS frame.
+- Keep descriptions brief but distinctive.`
+}
+
+// -- Full scene prompt (20s) --
+function buildScenePrompt(): string {
+  return `Analyze this webcam frame for an assistive audio system.
+Return ONLY valid JSON:
+{
+  "vibe": "<one of: calm, busy, tense, cheerful, empty, intimate>",
+  "environment": "<one of: indoors_home, indoors_office, indoors_public, outdoors_nature, outdoors_urban, outdoors_park, transit, unknown>",
+  "scene_description": "<one sentence describing the scene>"
+}
+Rules:
+- The vibe should reflect the overall mood/energy.
+- The environment should describe the physical setting.
 - Keep it concise.`
+}
 
-// Track known people across frames for stable IDs
-let knownPeople: string[] = []
+interface PeopleResult {
+  visible_users: string[]
+  entered: string[]
+  left: string[]
+}
 
-async function analyzeFrame(base64Image: string): Promise<{ vibe: string; visible_users: string[]; scene_description: string }> {
+interface SceneResult {
+  vibe: string
+  environment: string
+  scene_description: string
+}
+
+// Fast call: people tracking only
+async function analyzePeople(base64Image: string): Promise<PeopleResult> {
   const ai = getAI()
+  const prompt = buildPeoplePrompt()
 
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
@@ -49,7 +96,7 @@ async function analyzeFrame(base64Image: string): Promise<{ vibe: string; visibl
       {
         role: 'user',
         parts: [
-          { text: VISION_PROMPT },
+          { text: prompt },
           { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
         ],
       },
@@ -59,24 +106,93 @@ async function analyzeFrame(base64Image: string): Promise<{ vibe: string; visibl
     },
   })
 
-  const text = response.text ?? '{}'
-  const parsed = JSON.parse(text)
+  const parsed = JSON.parse(response.text ?? '{}')
+  const rawPeople: { id: string; description: string }[] = parsed.people ?? []
+  const peopleCount: number = parsed.people_count ?? rawPeople.length
 
-  const vibe: string = parsed.vibe ?? 'calm'
-  const people: { id: string; description: string }[] = parsed.people ?? []
-  const visible_users = people.map((p: { id: string }) => p.id)
-  const scene_description: string = parsed.scene_description ?? ''
+  // Normalize IDs
+  const framePeople: { id: string; description: string }[] = []
+  for (const p of rawPeople) {
+    if (trackedPeople.has(p.id)) {
+      framePeople.push({ id: p.id, description: p.description })
+    } else {
+      const newId = `person_${nextPersonId++}`
+      framePeople.push({ id: newId, description: p.description })
+    }
+  }
 
-  knownPeople = visible_users
-  return { vibe, visible_users, scene_description }
+  const effectivePeople = peopleCount === 0 ? [] : framePeople
+  const currentIds = new Set(effectivePeople.map(p => p.id))
+  const entered: string[] = []
+  const left: string[] = []
+
+  for (const p of effectivePeople) {
+    if (!trackedPeople.has(p.id)) {
+      entered.push(p.id)
+      console.log(`[Tracker] ENTERED: ${p.id} (${p.description})`)
+    }
+    trackedPeople.set(p.id, { id: p.id, description: p.description, missedFrames: 0 })
+  }
+
+  for (const [id, person] of trackedPeople) {
+    if (!currentIds.has(id)) {
+      person.missedFrames++
+      if (person.missedFrames === LEAVE_THRESHOLD) {
+        left.push(id)
+        console.log(`[Tracker] LEFT: ${id} (absent ${LEAVE_THRESHOLD} frames)`)
+      }
+      if (person.missedFrames > LEAVE_THRESHOLD + 3) {
+        trackedPeople.delete(id)
+      }
+    }
+  }
+
+  return { visible_users: [...currentIds], entered, left }
 }
 
-async function postToMusicEngine(vibe: string, visible_users: string[]): Promise<void> {
+// Slow call: full scene analysis
+async function analyzeScene(base64Image: string): Promise<SceneResult> {
+  const ai = getAI()
+  const prompt = buildScenePrompt()
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: prompt },
+          { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
+        ],
+      },
+    ],
+    config: {
+      responseMimeType: 'application/json',
+    },
+  })
+
+  const parsed = JSON.parse(response.text ?? '{}')
+  const result = {
+    vibe: parsed.vibe ?? 'calm',
+    environment: parsed.environment ?? 'unknown',
+    scene_description: parsed.scene_description ?? '',
+  }
+
+  // Update cached scene state
+  cachedVibe = result.vibe
+  cachedEnvironment = result.environment
+  cachedSceneDescription = result.scene_description
+  console.log(`[Scene] Updated: vibe=${result.vibe} env=${result.environment} desc="${result.scene_description}"`)
+
+  return result
+}
+
+async function postToMusicEngine(vibe: string, environment: string, visible_users: string[]): Promise<void> {
   try {
     const res = await fetch(`${MUSIC_ENGINE_URL}/update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vibe, visible_users }),
+      body: JSON.stringify({ vibe, environment, visible_users }),
     })
     const data = await res.json()
     console.log('[DesktopCamera] music engine response:', data)
@@ -106,25 +222,50 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // Fast people tracking (every 1s from client)
   if (req.method === 'POST' && req.url === '/frame') {
     let body = ''
     req.on('data', (chunk: Buffer) => { body += chunk.toString() })
     req.on('end', async () => {
       try {
         const { image } = JSON.parse(body) as { image: string }
-        console.log('[DesktopCamera] received frame (' + Math.round(image.length / 1024) + ' KB)')
 
-        const result = await analyzeFrame(image)
-        console.log('[DesktopCamera] scene:', result.vibe, 'people:', result.visible_users)
-        console.log('[DesktopCamera] description:', result.scene_description)
+        const people = await analyzePeople(image)
+        console.log('[People] visible:', people.visible_users, 'entered:', people.entered, 'left:', people.left)
 
-        // Forward to music engine
-        await postToMusicEngine(result.vibe, result.visible_users)
+        // Forward to music engine in background — don't block client response
+        postToMusicEngine(cachedVibe, cachedEnvironment, people.visible_users)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(result))
+        res.end(JSON.stringify({
+          ...people,
+          vibe: cachedVibe,
+          environment: cachedEnvironment,
+          scene_description: cachedSceneDescription,
+        }))
       } catch (err) {
-        console.error('[DesktopCamera] analysis error:', err)
+        console.error('[People] analysis error:', err)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err) }))
+      }
+    })
+    return
+  }
+
+  // Full scene description (every 20s from client)
+  if (req.method === 'POST' && req.url === '/scene') {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', async () => {
+      try {
+        const { image } = JSON.parse(body) as { image: string }
+
+        const scene = await analyzeScene(image)
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(scene))
+      } catch (err) {
+        console.error('[Scene] analysis error:', err)
         res.writeHead(500, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: String(err) }))
       }
@@ -134,7 +275,7 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, knownPeople }))
+    res.end(JSON.stringify({ ok: true, tracked: [...trackedPeople.values()] }))
     return
   }
 
