@@ -46,6 +46,9 @@ class FacePipelineModule: RCTEventEmitter {
             return
         }
 
+        visibleUserIds.removeAll()
+        currentSceneDescription = ""
+
         if let detectN = options["detectEveryNFrames"] as? Int {
             config.detectEveryNFrames = max(1, min(10, detectN))
         }
@@ -100,6 +103,7 @@ class FacePipelineModule: RCTEventEmitter {
             captureManager?.start()
             sceneDescriber?.start()
             isRunning = true
+            writeVisibleUsersFile()
             resolver(["status": "started"])
         } catch {
             rejecter("CAPTURE_ERROR", error.localizedDescription, error)
@@ -117,6 +121,9 @@ class FacePipelineModule: RCTEventEmitter {
         enrollmentManager?.cancelEnrollment()
 
         isRunning = false
+        visibleUserIds.removeAll()
+        currentSceneDescription = ""
+        writeVisibleUsersFile()
         resolver(["status": "stopped"])
     }
 
@@ -276,9 +283,26 @@ extension FacePipelineModule: VisionPipelineDelegate {
     private func writeVisibleUsersFile() {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let fileUrl = docs.appendingPathComponent("visible_users.txt")
-        let csv = visibleUserIds.values.joined(separator: ",")
-        let content = "visible_users: \(csv)\nscene_description: \(currentSceneDescription)"
+        let summary = visibleEnrolledSummary()
+        let idsCsv = summary.userIds.joined(separator: ",")
+        let namesCsv = summary.userNames.joined(separator: ",")
+        let content = """
+        visible_enrolled_count: \(summary.userIds.count)
+        visible_users: \(idsCsv)
+        visible_user_names: \(namesCsv)
+        scene_description: \(currentSceneDescription)
+        """
         try? content.write(to: fileUrl, atomically: true, encoding: .utf8)
+    }
+
+    private func visibleEnrolledSummary() -> (userIds: [String], userNames: [String]) {
+        let ids = Array(Set(visibleUserIds.values)).sorted()
+        let names = ids.map { enrolledDisplayName(for: $0) }
+        return (ids, names)
+    }
+
+    private func enrolledDisplayName(for userId: String) -> String {
+        galleryStore?.getEntry(identityId: userId)?.displayName ?? userId
     }
 }
 
@@ -286,14 +310,20 @@ extension FacePipelineModule: VisionPipelineDelegate {
 
 extension FacePipelineModule: TrackManagerDelegate {
     func trackManager(_ manager: TrackManager, didEmitEvent event: PersonEvent) {
-        emitEvent(name: "onPersonEvent", body: event.toDictionary())
+        // UI should only surface enrolled people.
+        guard event.userId.type == .enrolled else { return }
+        let displayName = enrolledDisplayName(for: event.userId.id)
+
+        var body = event.toDictionary()
+        body["display_name"] = displayName
+        emitEvent(name: "onPersonEvent", body: body)
 
         // Sync to Supabase (fire-and-forget)
         supabaseSync?.insertPersonEvent(event)
         supabaseSync?.upsertPerson(
             userId: event.userId.id,
             userType: event.userId.type.rawValue,
-            displayName: nil,
+            displayName: displayName,
             confidence: event.confidence
         )
         supabaseSync?.syncVisibleUser(event)
@@ -335,7 +365,12 @@ extension FacePipelineModule: EnrollmentManagerDelegate {
 
 extension FacePipelineModule: SceneDescriberDelegate {
     func sceneDescriber(_ describer: SceneDescriber, didDescribeScene description: SceneDescription) {
-        emitEvent(name: "onSceneDescription", body: description.toDictionary())
+        let summary = visibleEnrolledSummary()
+        var body = description.toDictionary()
+        body["visible_enrolled_count"] = summary.userIds.count
+        body["visible_user_ids"] = summary.userIds
+        body["visible_user_names"] = summary.userNames
+        emitEvent(name: "onSceneDescription", body: body)
         supabaseSync?.syncSceneDescription(description)
         currentSceneDescription = description.description
         writeVisibleUsersFile()

@@ -17,6 +17,7 @@ export interface PersonEvent {
   event_type: 'person_entered' | 'person_updated' | 'person_left';
   track_id: string;
   user_id: UserIdJson;
+  display_name?: string;
   confidence: number;
   bearing: number;
   distance_proxy: number;
@@ -30,6 +31,9 @@ export interface SceneDescriptionEvent {
   description: string;
   timestamp_ms: number;
   model: string;
+  visible_enrolled_count?: number;
+  visible_user_ids?: string[];
+  visible_user_names?: string[];
 }
 
 export interface StartPipelineConfig {
