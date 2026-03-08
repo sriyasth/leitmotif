@@ -20,10 +20,55 @@ function getAI() {
 // Local motif cache to avoid repeated Supabase lookups
 const motifCache = new Map<string, PersonMotif>()
 
+// Simple deterministic hash from a string → number
+function hashId(id: string): number {
+  let h = 0
+  for (let i = 0; i < id.length; i++) {
+    h = ((h << 5) - h + id.charCodeAt(i)) | 0
+  }
+  return Math.abs(h)
+}
+
+// Generate a distinct motif for any person ID — deterministic so same ID = same motif
+function generateMotifForId(userId: string): PersonMotif {
+  const h = hashId(userId)
+
+  const noteCounts = [3, 4, 5, 6, 7]
+  const contours = ['rise', 'fall', 'rise-fall', 'fall-rise', 'rise-fall-rise', 'fall-rise-fall', 'arc-up', 'arc-down']
+  const characters = ['Bright Sharp', 'Warm Gentle', 'Playful Quick', 'Calm Reserved', 'Grounded Steady', 'Soft Round', 'Angular Focused', 'Young Energetic']
+
+  const noteCount = noteCounts[h % noteCounts.length]
+  const contour = contours[(h >> 3) % contours.length]
+  const character = characters[(h >> 6) % characters.length]
+
+  // Generate distinct interval patterns seeded by hash
+  const intervals = [0]
+  for (let i = 1; i < noteCount; i++) {
+    const raw = ((h >> (i * 4)) % 11) - 5 // range -5 to +5
+    intervals.push(raw === 0 ? (i % 2 === 0 ? 2 : -2) : raw)
+  }
+
+  const name = userId.replace(/_/g, ' ')
+
+  return {
+    user_id: userId,
+    name,
+    motif_signature: {
+      note_count: noteCount,
+      interval_pattern: intervals,
+      rhythm_pattern: Array(noteCount).fill(1),
+      melodic_contour: contour,
+      character,
+    },
+    motif_prompt: `A distinct ${noteCount}-note ${contour} motif with ${character.toLowerCase()} character`,
+  }
+}
+
 async function fetchMotifs(userIds: string[]): Promise<PersonMotif[]> {
   const uncached = userIds.filter(id => !motifCache.has(id))
 
   if (uncached.length > 0) {
+    // Try Supabase first for enrolled users
     try {
       const { data, error } = await supabaseAdmin
         .from('person_motif_prompts')
@@ -36,22 +81,15 @@ async function fetchMotifs(userIds: string[]): Promise<PersonMotif[]> {
         motifCache.set(row.user_id, row as PersonMotif)
       }
     } catch (err) {
-      console.warn('[ContextEngine] Supabase motif fetch failed, using defaults:', err)
-      // Generate default motifs for development/testing
-      for (const userId of uncached) {
-        const defaultMotif: PersonMotif = {
-          user_id: userId,
-          name: userId === 'user_13' ? 'Alex' : userId === 'user_42' ? 'Jordan' : userId,
-          motif_signature: {
-            note_count: userId === 'user_13' ? 5 : 4,
-            interval_pattern: userId === 'user_13' ? [0, 3, -2, 5, -3] : [0, 4, -1, 2],
-            rhythm_pattern: [1, 1, 1, 1, 1],
-            melodic_contour: userId === 'user_13' ? 'rise-fall-rise' : 'fall-rise',
-            character: userId === 'user_13' ? 'Curious Calm' : 'Grounded Steady'
-          },
-          motif_prompt: `A ${userId === 'user_13' ? 'curious and calm' : 'grounded and steady'} 5-note motif`
-        }
-        motifCache.set(userId, defaultMotif)
+      console.warn('[ContextEngine] Supabase fetch failed, generating motifs locally:', err)
+    }
+
+    // Generate distinct motifs for any IDs still missing (unidentified people)
+    for (const userId of uncached) {
+      if (!motifCache.has(userId)) {
+        const motif = generateMotifForId(userId)
+        motifCache.set(userId, motif)
+        console.log(`[ContextEngine] Generated motif for ${userId}: ${motif.motif_signature.melodic_contour}, ${motif.motif_signature.character}`)
       }
     }
   }
@@ -74,15 +112,22 @@ export async function runContextEngine(
   input: SceneInput,
   previousState: MusicState | null
 ): Promise<ContextEngineOutput> {
-  const motifs = await fetchMotifs(input.visible_users)
-
   const previouslyActive = previousState?.active_motifs ?? []
   const entering = input.visible_users.filter(id => !previouslyActive.includes(id))
   const leaving = previouslyActive.filter(id => !input.visible_users.includes(id))
 
+  // Fetch motifs for ALL relevant people: currently visible + those leaving
+  const allRelevantIds = [...input.visible_users, ...leaving]
+  const allMotifs = await fetchMotifs(allRelevantIds)
+
+  const motifs = allMotifs.filter(m => input.visible_users.includes(m.user_id))
+  const leavingMotifs = allMotifs.filter(m => leaving.includes(m.user_id))
+
   const draftPrompt = buildLyriaPrompt({
     vibe: input.vibe,
+    environment: input.environment ?? 'unknown',
     motifs,
+    leavingMotifs,
     previousState,
     entering,
     leaving,
@@ -90,6 +135,7 @@ export async function runContextEngine(
 
   const geminiInput = [
     `Scene vibe: ${input.vibe}`,
+    `Environment: ${input.environment ?? 'unknown'}`,
     `Previous music state: ${previousState ? JSON.stringify(previousState) : 'none (first segment)'}`,
     `Users entering: ${entering.join(', ') || 'none'}`,
     `Users leaving: ${leaving.join(', ') || 'none'}`,

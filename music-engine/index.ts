@@ -16,11 +16,15 @@ import { LyriaPlayer } from './lyria-player.js'
 import type { MusicState, SceneInput } from './types.js'
 import Speaker from 'speaker'
 
+const MOTIF_COOLDOWN_MS = 4000 // hold motif prompts for 4s (3s motif + 1s buffer)
+
 export class MusicEngine {
   private musicState: MusicState | null = null
   private player: LyriaPlayer
   private running = false
   private segmentTimer: ReturnType<typeof setInterval> | null = null
+  private cooldownUntil = 0 // timestamp until which updates are blocked
+  private pendingInput: SceneInput | null = null // queued input during cooldown
 
   constructor(onAudioChunk: (chunk: Buffer) => void = () => {}) {
     this.player = new LyriaPlayer(onAudioChunk)
@@ -32,9 +36,16 @@ export class MusicEngine {
     await this._cycle(input)
   }
 
-  // Call this each time the scene changes (new frame, user enters/leaves, vibe shifts)
   async update(input: SceneInput): Promise<void> {
     if (!this.running) return
+
+    // During cooldown, just save the latest input — don't overwrite the motif prompt
+    if (Date.now() < this.cooldownUntil) {
+      this.pendingInput = input
+      console.log('[MusicEngine] cooldown active, queuing update')
+      return
+    }
+
     await this._cycle(input)
   }
 
@@ -48,6 +59,13 @@ export class MusicEngine {
     try {
       console.log('[MusicEngine] running context engine...')
       const { lyriaPrompt, newMusicState } = await runContextEngine(input, this.musicState)
+
+      // Detect if this cycle has motif changes (enter/leave)
+      const previouslyActive = this.musicState?.active_motifs ?? []
+      const entering = input.visible_users.filter(id => !previouslyActive.includes(id))
+      const leaving = previouslyActive.filter(id => !input.visible_users.includes(id))
+      const hasMotifChange = entering.length > 0 || leaving.length > 0
+
       this.musicState = newMusicState
 
       console.log('[MusicEngine] bpm:', lyriaPrompt.bpm)
@@ -59,6 +77,23 @@ export class MusicEngine {
         console.warn('[MusicEngine] updatePrompt failed, trying play anyway:', updateErr)
       }
       await this.player.play()
+
+      // If a motif just played, block updates so it has time to be heard
+      if (hasMotifChange) {
+        this.cooldownUntil = Date.now() + MOTIF_COOLDOWN_MS
+        this.pendingInput = null
+        console.log(`[MusicEngine] motif cooldown: holding for ${MOTIF_COOLDOWN_MS / 1000}s (entering: ${entering}, leaving: ${leaving})`)
+
+        // After cooldown, process the latest queued input
+        setTimeout(async () => {
+          if (this.pendingInput && this.running) {
+            console.log('[MusicEngine] cooldown expired, processing queued update')
+            const queued = this.pendingInput
+            this.pendingInput = null
+            await this._cycle(queued)
+          }
+        }, MOTIF_COOLDOWN_MS)
+      }
     } catch (err) {
       console.error('[MusicEngine] cycle error:', err)
     }

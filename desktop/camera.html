@@ -26,6 +26,7 @@
     .state-card .value { font-size: 18px; font-weight: 600; }
     .state-card .value.vibe { color: #ec5b13; }
     .state-card .value.people { color: #38bdf8; }
+    .state-card .value.env { color: #34d399; }
     .state-card .value.motifs { color: #a78bfa; }
 
     /* People list */
@@ -44,6 +45,7 @@
     .event .ts { color: #475569; flex-shrink: 0; font-variant-numeric: tabular-nums; }
     .event .icon { flex-shrink: 0; width: 16px; text-align: center; }
     .event .msg { color: #cbd5e1; }
+    .event.env-change .icon { color: #34d399; }
     .event.vibe-change .icon { color: #ec5b13; }
     .event.person-enter .icon { color: #6ee7b7; }
     .event.person-leave .icon { color: #fca5a5; }
@@ -76,6 +78,10 @@
           <div class="value vibe" id="cur-vibe">--</div>
         </div>
         <div class="state-card">
+          <div class="label">Environment</div>
+          <div class="value env" id="cur-env">--</div>
+        </div>
+        <div class="state-card">
           <div class="label">People</div>
           <div class="value people" id="cur-people">0</div>
         </div>
@@ -100,7 +106,8 @@
   </div>
 
   <script>
-    const FRAME_INTERVAL_MS = 1000;
+    const PEOPLE_INTERVAL_MS = 1000;
+    const SCENE_INTERVAL_MS = 20000;
     const SERVER = 'http://localhost:3002';
 
     const video = document.getElementById('cam');
@@ -109,14 +116,15 @@
     const statusEl = document.getElementById('status');
     const eventLog = document.getElementById('event-log');
     const curVibe = document.getElementById('cur-vibe');
+    const curEnv = document.getElementById('cur-env');
     const curPeople = document.getElementById('cur-people');
     const curMotifs = document.getElementById('cur-motifs');
     const sceneDesc = document.getElementById('scene-desc');
     const peopleList = document.getElementById('people-list');
 
-    // State tracking for diff detection
+    // State tracking for vibe/env diff detection (person tracking is server-side)
     let prevVibe = null;
-    let prevUsers = [];
+    let prevEnv = null;
 
     function ts() {
       return new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -147,68 +155,43 @@
       peopleList.innerHTML = html;
     }
 
+    function formatEnv(env) {
+      return (env || 'unknown').replace(/_/g, ' ');
+    }
+
     function handleResult(data) {
-      const vibe = data.vibe || 'unknown';
       const users = data.visible_users || [];
-      const desc = data.scene_description || '';
+      const entered = data.entered || [];
+      const left = data.left || [];
 
-      // Detect changes
-      const entered = users.filter(u => !prevUsers.includes(u));
-      const left = prevUsers.filter(u => !users.includes(u));
-      const vibeChanged = prevVibe !== null && prevVibe !== vibe;
-
-      // Update state cards
-      curVibe.textContent = vibe;
+      // Update people count cards
       curPeople.textContent = users.length;
-      curMotifs.textContent = users.length; // motifs = 1 per person
-      sceneDesc.textContent = desc || 'No description';
+      curMotifs.textContent = users.length;
 
       // Update people tags
       updatePeopleList(users, entered, left);
 
-      // Log events
-      if (vibeChanged) {
-        addEvent('vibe-change', '\u25C9', `Vibe changed: ${prevVibe} \u2192 ${vibe}`);
-      }
+      // Log people events
       for (const u of entered) {
         addEvent('person-enter', '\u25B2', `${u} entered the scene`);
-        addEvent('motif-change', '\u266B', `Motif activated for ${u}`);
+        addEvent('motif-change', '\u266B', `Entry motif playing for ${u}`);
       }
       for (const u of left) {
         addEvent('person-leave', '\u25BC', `${u} left the scene`);
-        addEvent('motif-change', '\u266B', `Motif deactivated for ${u}`);
-      }
-      if (!vibeChanged && entered.length === 0 && left.length === 0) {
-        addEvent('scene', '\u00B7', `Scene steady \u2014 ${vibe}, ${users.length} people`);
-      }
-
-      // Save state for next diff
-      prevVibe = vibe;
-      prevUsers = [...users];
-    }
-
-    async function start() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 640, height: 480, facingMode: 'user' }
-        });
-        video.srcObject = stream;
-        statusEl.textContent = 'Camera active \u2014 analyzing every ' + (FRAME_INTERVAL_MS / 1000) + 's';
-        addEvent('scene', '\u25CF', 'Camera started');
-        setInterval(captureAndSend, FRAME_INTERVAL_MS);
-      } catch (err) {
-        statusEl.textContent = 'Camera error: ' + err.message;
-        addEvent('error', '\u2716', 'Camera error: ' + err.message);
+        addEvent('motif-change', '\u266B', `Exit motif (inverted) playing for ${u}`);
       }
     }
 
-    async function captureAndSend() {
+    function captureFrame() {
       canvas.width = video.videoWidth || 640;
       canvas.height = video.videoHeight || 480;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-      const base64 = dataUrl.split(',')[1];
+      return canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+    }
 
+    // Fast loop: people tracking every 1s
+    async function sendPeopleFrame() {
+      const base64 = captureFrame();
       try {
         const res = await fetch(SERVER + '/frame', {
           method: 'POST',
@@ -218,7 +201,53 @@
         const data = await res.json();
         handleResult(data);
       } catch (err) {
-        addEvent('error', '\u2716', 'Send error: ' + err.message);
+        addEvent('error', '\u2716', 'People tracking error: ' + err.message);
+      }
+    }
+
+    // Slow loop: full scene description every 20s
+    async function sendSceneFrame() {
+      const base64 = captureFrame();
+      try {
+        const res = await fetch(SERVER + '/scene', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: base64 }),
+        });
+        const data = await res.json();
+        // Update scene-specific UI
+        if (data.vibe) {
+          const vibeChanged = prevVibe !== null && prevVibe !== data.vibe;
+          const envChanged = prevEnv !== null && prevEnv !== data.environment;
+          if (vibeChanged) addEvent('vibe-change', '\u25C9', `Vibe changed: ${prevVibe} \u2192 ${data.vibe}`);
+          if (envChanged) addEvent('env-change', '\u25A3', `Environment changed: ${formatEnv(prevEnv)} \u2192 ${formatEnv(data.environment)}`);
+          curVibe.textContent = data.vibe;
+          curEnv.textContent = formatEnv(data.environment);
+          sceneDesc.textContent = data.scene_description || 'No description';
+          prevVibe = data.vibe;
+          prevEnv = data.environment;
+        }
+        addEvent('scene', '\u25A3', `Scene refreshed: ${data.vibe}, ${formatEnv(data.environment)}`);
+      } catch (err) {
+        addEvent('error', '\u2716', 'Scene analysis error: ' + err.message);
+      }
+    }
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: 'user' }
+        });
+        video.srcObject = stream;
+        statusEl.textContent = 'Camera active \u2014 people every 1s, scene every 20s';
+        addEvent('scene', '\u25CF', 'Camera started');
+        // Kick off scene analysis immediately, then every 20s
+        sendSceneFrame();
+        setInterval(sendPeopleFrame, PEOPLE_INTERVAL_MS);
+        setInterval(sendSceneFrame, SCENE_INTERVAL_MS);
+      } catch (err) {
+        statusEl.textContent = 'Camera error: ' + err.message;
+        addEvent('error', '\u2716', 'Camera error: ' + err.message);
       }
     }
 
