@@ -479,6 +479,12 @@ await FacePipeline.stopPipeline();
 
 - **AdaFace_IR50** — CoreML-converted face recognition model located in `models/AdaFace_IR50.mlpackage`
 
+To convert the AdaFace model from a PyTorch checkpoint to CoreML format, run:
+
+```bash
+python scripts/convert_adaface.py
+```
+
 ---
 
 ## How It All Fits Together
