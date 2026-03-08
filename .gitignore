@@ -1,4 +1,50 @@
+# Dependencies
 node_modules/
-dist/
-.DS_Store
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
 *.local
+
+# Build output
+dist/
+build/
+*.js.map
+*.xcarchive
+DerivedData/
+
+# Audio output
+*.wav
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# React Native / iOS
+**/ios/Pods/
+**/ios/build/
+**/Podfile.lock
+**/*.xcuserstate
+
+# React Native / Android
+**/android/.gradle/
+**/android/app/build/
+**/android/gradle/wrapper/gradle-wrapper.jar
+**/android/app/debug.keystore
+
+# Lock files (generated)
+apps/mobile/package-lock.json
+apps/mobile/Gemfile.lock
+
+# Models (large binary files)
+models/
+
+# Test videos (large binary files)
+testvideos/
