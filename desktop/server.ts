@@ -25,9 +25,10 @@ interface TrackedPerson {
   id: string
   description: string
   missedFrames: number // how many consecutive frames they've been absent
+  present: boolean     // currently visible in scene
 }
 
-const trackedPeople = new Map<string, TrackedPerson>()
+const trackedPeople = new Map<string, TrackedPerson>() // never deleted — persistent memory
 const LEAVE_THRESHOLD = 2 // must be absent for this many frames before considered "left"
 let nextPersonId = 1
 
@@ -38,10 +39,16 @@ let cachedSceneDescription = ''
 
 // -- Fast people-tracking prompt (1s) --
 function buildPeoplePrompt(): string {
-  const currentPeople = [...trackedPeople.values()].filter(p => p.missedFrames === 0)
-  const peopleContext = currentPeople.length > 0
-    ? `\nPeople currently tracked:\n${currentPeople.map(p => `- ${p.id}: ${p.description}`).join('\n')}\nReuse these exact IDs if same person is still visible.`
-    : ''
+  const presentPeople = [...trackedPeople.values()].filter(p => p.present)
+  const absentPeople = [...trackedPeople.values()].filter(p => !p.present)
+
+  let peopleContext = ''
+  if (presentPeople.length > 0) {
+    peopleContext += `\nPeople currently in scene:\n${presentPeople.map(p => `- ${p.id}: ${p.description}`).join('\n')}\nReuse these exact IDs if the same person is still visible.`
+  }
+  if (absentPeople.length > 0) {
+    peopleContext += `\nPeople seen before (not currently visible):\n${absentPeople.map(p => `- ${p.id}: ${p.description}`).join('\n')}\nIf any of these people have returned, reuse their EXACT ID.`
+  }
 
   return `Count and identify people in this webcam frame. Be fast and precise.
 ${peopleContext}
@@ -49,12 +56,13 @@ Return ONLY valid JSON:
 {
   "people_count": <integer>,
   "people": [
-    { "id": "<reuse existing ID or person_N for new>", "description": "<brief: hair, clothing, position>" }
+    { "id": "<reuse existing ID if same person, or person_N for genuinely new>", "description": "<brief: hair, clothing, position>" }
   ]
 }
 Rules:
 - If 0 people visible, return people_count: 0 and empty array.
 - Only include people actually visible in THIS frame.
+- IMPORTANT: If someone matches a previously seen person (by appearance/clothing), reuse their original ID. Only assign a new ID for genuinely new people.
 - Keep descriptions brief but distinctive.`
 }
 
@@ -110,7 +118,7 @@ async function analyzePeople(base64Image: string): Promise<PeopleResult> {
   const rawPeople: { id: string; description: string }[] = parsed.people ?? []
   const peopleCount: number = parsed.people_count ?? rawPeople.length
 
-  // Normalize IDs
+  // Normalize IDs — reuse known IDs, assign new ones only for genuinely new people
   const framePeople: { id: string; description: string }[] = []
   for (const p of rawPeople) {
     if (trackedPeople.has(p.id)) {
@@ -127,22 +135,26 @@ async function analyzePeople(base64Image: string): Promise<PeopleResult> {
   const left: string[] = []
 
   for (const p of effectivePeople) {
-    if (!trackedPeople.has(p.id)) {
+    const existing = trackedPeople.get(p.id)
+    if (!existing) {
+      // Brand new person
       entered.push(p.id)
-      console.log(`[Tracker] ENTERED: ${p.id} (${p.description})`)
+      console.log(`[Tracker] ENTERED (new): ${p.id} (${p.description})`)
+    } else if (!existing.present) {
+      // Known person returning
+      entered.push(p.id)
+      console.log(`[Tracker] RE-ENTERED: ${p.id} (${p.description})`)
     }
-    trackedPeople.set(p.id, { id: p.id, description: p.description, missedFrames: 0 })
+    trackedPeople.set(p.id, { id: p.id, description: p.description, missedFrames: 0, present: true })
   }
 
   for (const [id, person] of trackedPeople) {
-    if (!currentIds.has(id)) {
+    if (!currentIds.has(id) && person.present) {
       person.missedFrames++
-      if (person.missedFrames === LEAVE_THRESHOLD) {
+      if (person.missedFrames >= LEAVE_THRESHOLD) {
+        person.present = false
         left.push(id)
         console.log(`[Tracker] LEFT: ${id} (absent ${LEAVE_THRESHOLD} frames)`)
-      }
-      if (person.missedFrames > LEAVE_THRESHOLD + 3) {
-        trackedPeople.delete(id)
       }
     }
   }
@@ -187,6 +199,8 @@ async function analyzeScene(base64Image: string): Promise<SceneResult> {
   return result
 }
 
+let musicEngineReady = false
+
 async function postToMusicEngine(vibe: string, environment: string, visible_users: string[]): Promise<void> {
   try {
     const res = await fetch(`${MUSIC_ENGINE_URL}/update`, {
@@ -199,6 +213,29 @@ async function postToMusicEngine(vibe: string, environment: string, visible_user
   } catch (err) {
     console.warn('[DesktopCamera] music engine unreachable:', (err as Error).message)
   }
+}
+
+async function checkMusicEngineReady(): Promise<boolean> {
+  try {
+    const res = await fetch(`${MUSIC_ENGINE_URL}/health`)
+    const data = await res.json() as { ok: boolean; ready?: boolean }
+    return data.ready === true
+  } catch {
+    return false
+  }
+}
+
+// Pre-warm: start ambient background with no people so Lyria is connected and playing
+async function warmupMusicEngine(): Promise<void> {
+  console.log('[DesktopCamera] warming up music engine (empty scene)...')
+  await postToMusicEngine('calm', 'unknown', [])
+
+  // Poll until music engine reports ready
+  while (!musicEngineReady) {
+    musicEngineReady = await checkMusicEngineReady()
+    if (!musicEngineReady) await new Promise(r => setTimeout(r, 500))
+  }
+  console.log('[DesktopCamera] music engine is ready')
 }
 
 // Serve the camera HTML page and handle frame POSTs
@@ -273,6 +310,47 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     return
   }
 
+  // Manual motif trigger from contacts panel
+  if (req.method === 'POST' && req.url === '/play-motif') {
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', async () => {
+      try {
+        const { user_id } = JSON.parse(body) as { user_id: string }
+        console.log(`[PlayMotif] triggering motif for ${user_id}`)
+
+        // Get current visible users from camera tracking
+        const currentVisible = [...trackedPeople.values()].filter(p => p.present).map(p => p.id)
+
+        // Add the contact user and send to music engine (triggers "entering")
+        const withContact = [...new Set([...currentVisible, user_id])]
+        await postToMusicEngine(cachedVibe, cachedEnvironment, withContact)
+
+        // After cooldown, remove the contact user so they can be triggered again
+        setTimeout(() => {
+          const stillVisible = [...trackedPeople.values()].filter(p => p.present).map(p => p.id)
+          const without = stillVisible.filter(id => id !== user_id)
+          postToMusicEngine(cachedVibe, cachedEnvironment, without)
+          console.log(`[PlayMotif] removed ${user_id} after cooldown`)
+        }, 4500)
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, user_id }))
+      } catch (err) {
+        console.error('[PlayMotif] error:', err)
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err) }))
+      }
+    })
+    return
+  }
+
+  if (req.method === 'GET' && req.url === '/ready') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ready: musicEngineReady }))
+    return
+  }
+
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ok: true, tracked: [...trackedPeople.values()] }))
@@ -283,12 +361,14 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end()
 })
 
-server.listen(CAMERA_PORT, () => {
+server.listen(CAMERA_PORT, async () => {
   const url = `http://localhost:${CAMERA_PORT}`
   console.log(`[DesktopCamera] server running at ${url}`)
-  console.log('[DesktopCamera] opening camera popup...')
 
-  // Auto-open the browser
+  // Pre-warm music engine before opening browser
+  await warmupMusicEngine()
+
+  console.log('[DesktopCamera] opening camera popup...')
   const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
   exec(`${openCmd} ${url}`)
 })

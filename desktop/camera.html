@@ -11,10 +11,43 @@
     #status { font-size: 12px; color: #64748b; }
     .main { display: flex; flex: 1; overflow: hidden; }
 
-    /* Left — camera */
-    .cam-panel { flex: 0 0 640px; display: flex; flex-direction: column; align-items: center; padding: 16px; }
+    /* Left — camera + contacts */
+    .cam-panel { flex: 0 0 640px; display: flex; flex-direction: column; padding: 16px; overflow-y: auto; }
     video { width: 100%; max-width: 640px; border-radius: 8px; background: #111; }
     canvas { display: none; }
+
+    /* Contacts panel */
+    .contacts-panel { margin-top: 16px; width: 100%; }
+    .contacts-panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: #64748b; margin-bottom: 10px; }
+    .contact-card {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px; margin-bottom: 6px;
+      background: #111827; border: 1px solid #1e293b; border-radius: 10px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .contact-card:hover { border-color: #334155; }
+    .contact-card.playing { border-color: #ec5b13; background: #1a1008; }
+    .contact-card.cooldown { opacity: 0.5; pointer-events: none; }
+    .contact-avatar {
+      width: 40px; height: 40px; border-radius: 50%;
+      background: #1e293b; display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .contact-avatar svg { width: 20px; height: 20px; fill: #64748b; }
+    .contact-card.playing .contact-avatar { background: #ec5b13; }
+    .contact-card.playing .contact-avatar svg { fill: #fff; }
+    .contact-info { flex: 1; min-width: 0; }
+    .contact-name { font-size: 14px; font-weight: 500; color: #e2e8f0; }
+    .contact-sub { font-size: 11px; color: #475569; margin-top: 2px; }
+    .play-btn {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: #1e293b; border: none; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; transition: background 0.2s;
+    }
+    .play-btn:hover { background: #ec5b13; }
+    .play-btn svg { width: 14px; height: 14px; fill: #94a3b8; }
+    .play-btn:hover svg { fill: #fff; }
 
     /* Right — engine output */
     .engine-panel { flex: 1; display: flex; flex-direction: column; border-left: 1px solid #1e293b; min-width: 320px; }
@@ -56,9 +89,39 @@
 
     /* Scene description */
     .scene-desc { padding: 8px 16px; font-size: 12px; color: #64748b; border-bottom: 1px solid #1e293b; min-height: 32px; }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: #0a0a0f;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px;
+    }
+    .loading-overlay.hidden { display: none; }
+    .loading-title { font-size: 24px; letter-spacing: 4px; color: #ec5b13; font-weight: 700; }
+    .loading-spinner {
+      width: 48px; height: 48px;
+      border: 3px solid #1e293b; border-top-color: #ec5b13;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-status { font-size: 14px; color: #64748b; text-align: center; line-height: 1.6; }
+    .loading-step { transition: color 0.3s; }
+    .loading-step.done { color: #34d399; }
+    .loading-step.active { color: #e2e8f0; }
   </style>
 </head>
 <body>
+  <div class="loading-overlay" id="loading-overlay">
+    <div class="loading-title">LEITMOTIF</div>
+    <div class="loading-spinner"></div>
+    <div class="loading-status">
+      <div class="loading-step active" id="step-engine">Connecting to music engine...</div>
+      <div class="loading-step" id="step-lyria">Initializing Lyria audio...</div>
+      <div class="loading-step" id="step-camera">Starting camera...</div>
+    </div>
+  </div>
+
   <header>
     <h1>LEITMOTIF</h1>
     <span id="status">Requesting camera...</span>
@@ -68,6 +131,35 @@
     <div class="cam-panel">
       <video id="cam" autoplay playsinline muted></video>
       <canvas id="snap"></canvas>
+
+      <div class="contacts-panel">
+        <h3>Contacts</h3>
+        <div class="contact-card" data-user="alice_chen">
+          <div class="contact-avatar"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></div>
+          <div class="contact-info"><div class="contact-name">Alice Chen</div><div class="contact-sub">Motif A</div></div>
+          <button class="play-btn" title="Play motif"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        </div>
+        <div class="contact-card" data-user="marcus_johnson">
+          <div class="contact-avatar"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></div>
+          <div class="contact-info"><div class="contact-name">Marcus Johnson</div><div class="contact-sub">Motif B</div></div>
+          <button class="play-btn" title="Play motif"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        </div>
+        <div class="contact-card" data-user="priya_patel">
+          <div class="contact-avatar"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></div>
+          <div class="contact-info"><div class="contact-name">Priya Patel</div><div class="contact-sub">Motif C</div></div>
+          <button class="play-btn" title="Play motif"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        </div>
+        <div class="contact-card" data-user="james_obrien">
+          <div class="contact-avatar"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></div>
+          <div class="contact-info"><div class="contact-name">James O'Brien</div><div class="contact-sub">Motif D</div></div>
+          <button class="play-btn" title="Play motif"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        </div>
+        <div class="contact-card" data-user="sofia_rivera">
+          <div class="contact-avatar"><svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg></div>
+          <div class="contact-info"><div class="contact-name">Sofia Rivera</div><div class="contact-sub">Motif E</div></div>
+          <button class="play-btn" title="Play motif"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        </div>
+      </div>
     </div>
 
     <div class="engine-panel">
@@ -233,19 +325,90 @@
       }
     }
 
+    // Contacts — play motif on click
+    const MOTIF_COOLDOWN_MS = 5000;
+    document.querySelectorAll('.contact-card .play-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const card = btn.closest('.contact-card');
+        const userId = card.dataset.user;
+        if (card.classList.contains('cooldown')) return;
+
+        card.classList.add('playing', 'cooldown');
+        addEvent('motif-change', '\u266B', `Playing motif for ${card.querySelector('.contact-name').textContent}`);
+
+        try {
+          await fetch(SERVER + '/play-motif', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId }),
+          });
+        } catch (err) {
+          addEvent('error', '\u2716', 'Motif trigger error: ' + err.message);
+        }
+
+        setTimeout(() => { card.classList.remove('playing'); }, 3000);
+        setTimeout(() => { card.classList.remove('cooldown'); }, MOTIF_COOLDOWN_MS);
+      });
+    });
+
+    const overlay = document.getElementById('loading-overlay');
+    const stepEngine = document.getElementById('step-engine');
+    const stepLyria = document.getElementById('step-lyria');
+    const stepCamera = document.getElementById('step-camera');
+
+    function setStep(el, state) {
+      el.className = 'loading-step ' + state;
+    }
+
+    async function waitForReady() {
+      // Step 1: wait for music engine to be reachable
+      setStep(stepEngine, 'active');
+      while (true) {
+        try {
+          const res = await fetch(SERVER + '/ready');
+          const data = await res.json();
+          if (data.ready) break;
+        } catch {}
+        await new Promise(r => setTimeout(r, 500));
+      }
+      setStep(stepEngine, 'done');
+      stepEngine.textContent = 'Music engine connected';
+
+      // Step 2: Lyria is ready (confirmed by /ready)
+      setStep(stepLyria, 'done');
+      stepLyria.textContent = 'Lyria audio ready';
+
+      // Step 3: start camera
+      setStep(stepCamera, 'active');
+      stepCamera.textContent = 'Starting camera...';
+    }
+
     async function start() {
+      await waitForReady();
+
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480, facingMode: 'user' }
         });
         video.srcObject = stream;
+
+        setStep(stepCamera, 'done');
+        stepCamera.textContent = 'Camera ready';
+
+        // Brief pause so user sees all green before overlay disappears
+        await new Promise(r => setTimeout(r, 600));
+        overlay.classList.add('hidden');
+
         statusEl.textContent = 'Camera active \u2014 people every 1s, scene every 20s';
-        addEvent('scene', '\u25CF', 'Camera started');
+        addEvent('scene', '\u25CF', 'System ready \u2014 camera started');
+
         // Kick off scene analysis immediately, then every 20s
         sendSceneFrame();
         setInterval(sendPeopleFrame, PEOPLE_INTERVAL_MS);
         setInterval(sendSceneFrame, SCENE_INTERVAL_MS);
       } catch (err) {
+        stepCamera.textContent = 'Camera error: ' + err.message;
+        setStep(stepCamera, 'error');
         statusEl.textContent = 'Camera error: ' + err.message;
         addEvent('error', '\u2716', 'Camera error: ' + err.message);
       }

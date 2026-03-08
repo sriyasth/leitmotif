@@ -32,23 +32,16 @@ function inferInstrument(character: string): string {
   return 'glockenspiel'
 }
 
-function inferRhythmPattern(noteCount: number): string {
-  if (noteCount <= 4) return 'Quarter note, quarter note, quarter note, half note'
-  if (noteCount === 5) return 'Quarter note, quarter note, half note, two eighth notes'
-  if (noteCount === 6) return 'Four eighth notes, two quarter notes'
-  return 'Three eighth notes, quarter note, two eighth notes, half note'
-}
-
 function buildFrozenMotifDescription(motif: PersonMotif): string {
   const sig = motif.motif_signature
   const instrument = inferInstrument(sig.character || '')
-  const rhythmPattern = inferRhythmPattern(sig.note_count)
 
   return [
     `Begin with a single sharp snare hit to mark the motif start.`,
-    `Immediately after the snare hit, a solo ${instrument} plays a ${sig.note_count}-note melody.`,
-    `Total motif duration: exactly 3 seconds (snare hit + melody).`,
-    `Rhythm: ${rhythmPattern}.`,
+    `Immediately after the snare hit, a solo ${instrument} plays a rapid ${sig.note_count}-note burst.`,
+    `Total motif duration: exactly 3 seconds (snare hit + rapid melody).`,
+    `All notes should be played as fast sixteenth notes or staccato bursts — much quicker than the background tempo.`,
+    `The motif should feel like a quick, punchy musical alert, not a slow melody.`,
     `Melodic contour: ${sig.melodic_contour}.`,
     `Interval pattern: ${sig.interval_pattern.join(', ')}.`,
     `Character reference for timbre only: ${sig.character}.`,

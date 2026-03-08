@@ -129,6 +129,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   console.log('[MusicEngine] audio output → speakers + ' + OUTPUT_FILE)
 
   let started = false
+  let ready = false // true once Lyria is connected and first ambient cycle is done
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (req.method === 'POST' && req.url === '/update') {
@@ -142,6 +143,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           if (!started) {
             started = true
             await engine.start(scene)
+            ready = true
+            console.log('[MusicEngine] ready — Lyria connected, ambient background playing')
           } else {
             await engine.update(scene)
           }
@@ -156,7 +159,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       })
     } else if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, started }))
+      res.end(JSON.stringify({ ok: true, started, ready }))
     } else {
       res.writeHead(404)
       res.end()
