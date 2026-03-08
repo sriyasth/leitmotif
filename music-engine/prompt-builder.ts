@@ -53,14 +53,14 @@ function buildFrozenMotifDescription(motif: PersonMotif): string {
 }
 
 const ENV_TEXTURE: Record<string, string> = {
-  outdoors_nature: 'Use organic textures: gentle wind pads, soft wooden percussion, birdsong-like tones. Key center should feel open and pastoral (G major, D major).',
-  outdoors_urban: 'Use urban-ambient textures: distant muted synth hum, light metallic resonance, subtle rhythmic pulse. Slightly faster feel.',
-  outdoors_park: 'Use warm outdoor textures: acoustic guitar harmonics, soft marimba, airy pads. Relaxed and spacious.',
-  indoors_home: 'Use intimate warm textures: soft piano, gentle Rhodes, warm pad. Close and cozy feel.',
-  indoors_office: 'Use neutral focused textures: minimal clean synth pad, very soft hi-hat, muted keys. Unobtrusive and steady.',
-  indoors_public: 'Use open indoor textures: light reverb pad, soft ambient chime, gentle pulse. Spacious but contained.',
-  transit: 'Use motion textures: slow rhythmic pulse, gentle low drone, soft evolving pad. Sense of movement.',
-  unknown: 'Use neutral ambient textures: soft pad, gentle piano.',
+  outdoors_nature: 'A single quiet sustained string pad. Nothing else.',
+  outdoors_urban: 'A single quiet low synth drone. Nothing else.',
+  outdoors_park: 'A single quiet warm pad. Nothing else.',
+  indoors_home: 'A single quiet soft piano chord held. Nothing else.',
+  indoors_office: 'A single quiet clean synth pad. Nothing else.',
+  indoors_public: 'A single quiet airy pad. Nothing else.',
+  transit: 'A single quiet low drone. Nothing else.',
+  unknown: 'A single quiet soft pad. Nothing else.',
 }
 
 export function buildLyriaPrompt(input: PromptBuilderInput): string {
@@ -71,52 +71,37 @@ export function buildLyriaPrompt(input: PromptBuilderInput): string {
   const hasMotifChange = entering.length > 0 || leaving.length > 0
   const envTexture = ENV_TEXTURE[environment] ?? ENV_TEXTURE.unknown
 
-  // Base musical context
+  // Base musical context — keep background extremely simple
+  const bgRules = [
+    `The background must be ONLY a single sustained instrument at very low volume.`,
+    `${envTexture}`,
+    `No melody, no rhythm, no percussion, no chord changes, no movement in the background.`,
+    `The background should be barely audible — like quiet room tone.`,
+    `ONE instrument, ONE sustained note or chord, very quiet. That is the entire background.`,
+  ]
+
   if (!previousState) {
     lines.push(
-      `Generate a continuous ambient musical background.`,
-      `Scene vibe: ${vibe}.`,
-      `Environment: ${environment}.`,
-      `${envTexture}`,
-      `Texture: sparse, minimal, slowly evolving.`,
+      `Generate an extremely minimal ambient background.`,
+      `Scene vibe: ${vibe}. Environment: ${environment}.`,
+      ...bgRules,
       `Tempo: 70-90 bpm.`,
-      `Do not make the background busy, dense, muddy, or melody-forward.`,
-      `Foreground motifs must always stand out clearly from the background.`
     )
   } else if (vibeChanged) {
     lines.push(
-      `The scene mood is shifting from "${previousState.vibe}" to "${vibe}".`,
-      `Environment: ${environment}.`,
-      `${envTexture}`,
-      `Begin from the current musical texture: ${previousState.tempo} bpm, key of ${previousState.key}.`,
-      previousState.instrumentation.length
-        ? `Current instrumentation: ${previousState.instrumentation.join(', ')}.`
-        : '',
-      `Gradually transition the background over 4-6 seconds.`,
-      `Do not cut abruptly.`,
-      `Let the harmonic palette shift smoothly from ${previousState.harmony_palette.join(', ') || 'the current palette'} toward what suits "${vibe}".`,
-      `Tempo may drift slightly toward the new vibe's natural pace, but should not jump.`,
-      `The background layer must remain soft and minimal so foreground motifs are clearly audible.`
+      `Scene mood shifting from "${previousState.vibe}" to "${vibe}".`,
+      `Slowly crossfade the single background pad to match the new vibe.`,
+      ...bgRules,
     )
   } else if (hasMotifChange) {
     lines.push(
-      `The scene vibe remains "${vibe}". Continue the existing soundscape without interruption.`,
-      `Keep tempo at ${previousState.tempo} bpm, key of ${previousState.key}.`,
-      previousState.instrumentation.length
-        ? `Maintain instrumentation: ${previousState.instrumentation.join(', ')}.`
-        : '',
-      `Only the people in the scene have changed.`,
-      `Do not reset the background.`,
-      `The background layer must remain soft and minimal so foreground motifs are clearly audible.`
+      `Scene vibe remains "${vibe}". Keep the background pad unchanged.`,
+      ...bgRules,
     )
   } else {
     lines.push(
-      `Continue the existing musical soundscape unchanged.`,
-      `Maintain tempo at ${previousState.tempo} bpm, key of ${previousState.key}.`,
-      previousState.instrumentation.length
-        ? `Background instrumentation: ${previousState.instrumentation.join(', ')}.`
-        : '',
-      `The background layer must remain soft and minimal so foreground motifs are clearly audible.`
+      `Continue the same quiet background pad. Do not change anything.`,
+      ...bgRules,
     )
   }
 
@@ -181,12 +166,12 @@ export function buildLyriaPrompt(input: PromptBuilderInput): string {
 
   // Accessibility rules
   lines.push(
-    `\nAccessibility Rules:`,
-    `Motifs represent people and must always be easy to recognize.`,
-    `Foreground motifs must always be clearly audible over the background.`,
-    'MAKE MOTIFS MUCH LOUDER THAN THE BACKGROUND. EVEN IF THE BACKGROUND IS LOUD, THE MOTIFS MUST BE LOUDER AND CLEARER.',
+    `\nCRITICAL RULES:`,
+    `The background is ONLY a single quiet sustained pad. Nothing more. No melody, no rhythm, no texture.`,
+    `Motifs must be 10x louder than the background. The background should be nearly silent.`,
+    `When a motif plays, MUTE the background completely. Total silence except the motif.`,
     `Never play two motifs simultaneously.`,
-    `The soundscape should feel calm and readable, never chaotic.`
+    `The background must never compete with motifs. If in doubt, make the background quieter.`
   )
 
   return lines.join('\n')

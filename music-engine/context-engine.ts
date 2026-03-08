@@ -106,7 +106,9 @@ Given a scene and musical context, output ONLY valid JSON with this exact struct
   "harmony_palette": [<string array of harmonic descriptors>],
   "refined_prompt": "<string — the final text prompt to send to the Lyria music generator>"
 }
-Keep music calm, spatial, and non-intrusive. Motifs should be subtle but recognizable.`
+CRITICAL: The background must be extremely minimal — a single quiet sustained pad, nothing more. No melody, no rhythm, no percussion in the background.
+Motifs are short loud bursts that must completely dominate the mix. Mute the background when a motif plays.
+The instrumentation array should contain at most 1 background instrument. Keep the refined_prompt as simple as possible.`
 
 export async function runContextEngine(
   input: SceneInput,
