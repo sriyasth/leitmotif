@@ -10,6 +10,8 @@ node_modules/
 # Build output
 dist/
 build/
+.next/
+out/
 *.js.map
 *.xcarchive
 DerivedData/
